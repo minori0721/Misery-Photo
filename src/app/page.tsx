@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Folder, 
@@ -46,7 +46,7 @@ const itemVariants = {
   show: { opacity: 1, y: 0, scale: 1 }
 };
 
-export default function GalleryPage() {
+function GalleryContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const currentPath = searchParams.get('path') || '';
@@ -402,6 +402,14 @@ export default function GalleryPage() {
       <style jsx global>{`
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+
+export default function GalleryPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-black flex items-center justify-center"><Loader2 className="w-10 h-10 animate-spin text-white/20" /></div>}>
+      <GalleryContent />
+    </Suspense>
+  );
+}
       `}</style>
     </div>
   );
