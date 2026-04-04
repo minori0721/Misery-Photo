@@ -69,10 +69,19 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
       for (const file of files) {
         if (file.name.toLowerCase().endsWith('.zip')) {
           const zipName = file.name.replace(/\.zip$/i, '');
-          const newPath = `${currentPath}${zipName}/`;
           
           setStatus(`正在解析压缩包: ${file.name}...`);
-          const zip = await JSZip.loadAsync(file);
+          const zip = await JSZip.loadAsync(file, {
+            decodeFileName: function(bytes: Uint8Array) {
+              try {
+                return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+              } catch (e) {
+                // 如果遭遇 Windows 等自带的非 UTF-8 压缩名，直接降频采用 GBK 中文标准解码避免乱码 
+                return new TextDecoder('gbk').decode(bytes);
+              }
+            }
+          } as any);
+          
           const entries = Object.keys(zip.files).filter(name => !zip.files[name].dir);
           const imageEntries = entries.filter(name => 
             name.toLowerCase().match(/\.(jpg|jpeg|png|webp|gif)$/)
@@ -80,7 +89,14 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
 
           for (const name of imageEntries) {
             const blob = await zip.files[name].async('blob');
-            uploadTasks.push({ blob, name, path: newPath });
+            
+            // 智能打平：只取最后子目录（或者用 zip 本身名字挂载底单）而不嵌套任何中间路径
+            const segments = name.split('/');
+            const fileName = segments.pop() || 'unknown.jpg';
+            const parentFolder = segments.length > 0 ? segments[segments.length - 1] : zipName;
+            
+            const targetPath = `${currentPath}${parentFolder}/`;
+            uploadTasks.push({ blob, name: fileName, path: targetPath });
           }
         } else {
           uploadTasks.push({ blob: file, name: file.name, path: currentPath });
