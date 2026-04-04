@@ -402,16 +402,16 @@ function GalleryContent() {
       <style jsx global>{`
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+      `}</style>
+    </div>
+  );
+}
 
 export default function GalleryPage() {
   return (
     <Suspense fallback={<div className="min-h-screen bg-black flex items-center justify-center"><Loader2 className="w-10 h-10 animate-spin text-white/20" /></div>}>
       <GalleryContent />
     </Suspense>
-  );
-}
-      `}</style>
-    </div>
   );
 }
 
