@@ -545,12 +545,28 @@ function GalleryContent() {
                       </div>
                     </div>
                   )}
-                  <div className={viewMode === 'grid' ? "w-full h-full relative overflow-hidden" : "w-full"}>
-                    <img src={file.url} alt={file.name} loading="lazy" className={viewMode === 'grid' ? "w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium" : "w-full h-auto select-none"} />
+                  <div className={`${viewMode === 'grid' ? "w-full h-full relative overflow-hidden" : "w-full"} min-h-[300px] overflow-hidden flex items-center justify-center transition-all duration-300 relative`}>
+                    {/* 加载骨架屏背景 */}
+                    <div className={`absolute inset-0 animate-pulse ${settings.theme === 'miku' ? 'bg-slate-100' : 'bg-white/5'}`} />
+                    
+                    <img 
+                      src={`/api/proxy?url=${encodeURIComponent(file.url)}&thumbnail=${viewMode === 'grid'}`} 
+                      alt={file.name} 
+                      loading="lazy" 
+                      className={viewMode === 'grid' 
+                        ? "w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium relative z-10" 
+                        : "w-full h-auto select-none relative z-10"} 
+                      onLoad={(e) => {
+                        const target = e.target as HTMLImageElement;
+                        target.parentElement?.style.setProperty('min-height', 'auto');
+                        const skeleton = target.parentElement?.querySelector('.animate-pulse');
+                        if (skeleton) (skeleton as HTMLElement).style.opacity = '0';
+                      }}
+                    />
                     
                     {/* 网格模式下的操作层 */}
                     {viewMode === 'grid' && (
-                      <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-all flex flex-col justify-between p-4">
+                      <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-all flex flex-col justify-between p-4 z-20">
                         <div className="flex justify-end">
                            <button onClick={() => handleDelete(file.path, 'image')} className="p-2 bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-all shadow-xl">
                               <Trash2 size={16} />
@@ -562,7 +578,7 @@ function GalleryContent() {
 
                     {/* 漫画模式下的悬停管理 */}
                     {viewMode === 'manga' && (
-                       <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                       <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity z-20">
                          <button onClick={() => handleDelete(file.path, 'image')} className="p-3 bg-black/60 backdrop-blur-md rounded-full text-red-500 border border-white/10 shadow-2xl">
                             <Trash2 size={24} />
                          </button>
@@ -723,7 +739,9 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
         <AnimatePresence mode="wait">
           <motion.img
             key={folder.previews?.[currentIdx] || 'empty'}
-            src={folder.previews?.[currentIdx] || '/folder-placeholder.png'}
+            src={folder.previews?.[currentIdx] 
+              ? `/api/proxy?url=${encodeURIComponent(folder.previews[currentIdx])}&thumbnail=true` 
+              : '/folder-placeholder.png'}
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
             transition={{ duration: 0.8 }}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-[3s]"
