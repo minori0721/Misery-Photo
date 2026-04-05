@@ -470,7 +470,8 @@ function GalleryContent() {
         const chunk = filesToDownload.slice(i, i + 5);
         await Promise.all(chunk.map(async (file) => {
           try {
-            const res = await fetch(`/api/proxy?url=${encodeURIComponent(file.url)}`, { signal });
+            const res = await fetch(file.url, { signal });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const blob = await res.blob();
             zip.file(file.zipPath, blob);
             completed++;
