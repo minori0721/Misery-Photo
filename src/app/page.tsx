@@ -380,27 +380,67 @@ function GalleryContent() {
   };
 
   const collectFolderFilesForZip = useCallback(async (folder: GalleryFolder, signal: AbortSignal): Promise<FileToDownload[]> => {
-    const out: FileToDownload[] = [];
+    const collectedKeys: string[] = [];
+    const queue: string[] = [folder.path];
 
-    const walk = async (path: string, zipPrefix: string) => {
-      if (signal.aborted) return;
-      const res = await fetch(`/api/gallery?path=${encodeURIComponent(path)}&json=1`, { signal });
-      const json = await res.json();
-      if (!json.success) return;
+    while (queue.length > 0) {
+      if (signal.aborted) return [];
+      const walkPath = queue.shift()!;
+      let continuationToken: string | null = null;
 
-      const files = (json.data.files || []) as GalleryFile[];
-      files.forEach((f) => {
-        out.push({ name: f.name, url: f.url, zipPath: `${zipPrefix}/${f.name}` });
+      do {
+        const tokenPart = continuationToken ? `&continuationToken=${encodeURIComponent(continuationToken)}` : '';
+        const signerRes = await fetch(`/api/gallery?path=${encodeURIComponent(walkPath)}${tokenPart}`, { signal });
+        const signerJson = await signerRes.json();
+        if (!signerJson.success) {
+          throw new Error(signerJson.message || '获取下载列表签名失败');
+        }
+
+        const listRes = await fetch(signerJson.data.listUrl, { signal });
+        if (!listRes.ok) {
+          throw new Error(`S3 列表请求失败: ${listRes.status}`);
+        }
+
+        const xmlText = await listRes.text();
+        const parsed = parseS3ListXml(xmlText, walkPath);
+        parsed.filesMeta.forEach((m) => collectedKeys.push(m.key));
+        parsed.folders.forEach((f) => queue.push(f.path));
+        continuationToken = parsed.isTruncated ? parsed.nextContinuationToken : null;
+      } while (continuationToken);
+    }
+
+    const uniqKeys = Array.from(new Set(collectedKeys));
+    if (uniqKeys.length === 0) return [];
+
+    const signedUrlMap: Record<string, string> = {};
+    for (let i = 0; i < uniqKeys.length; i += 200) {
+      const chunkKeys = uniqKeys.slice(i, i + 200);
+      const signRes = await fetch('/api/gallery', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
+        signal,
       });
-
-      const folders = (json.data.folders || []) as GalleryFolder[];
-      for (const child of folders) {
-        await walk(child.path, `${zipPrefix}/${child.name}`);
+      const signJson = await signRes.json();
+      if (!signJson.success) {
+        throw new Error(signJson.message || '下载对象签名失败');
       }
-    };
+      Object.assign(signedUrlMap, signJson.data || {});
+    }
 
-    await walk(folder.path, folder.name);
-    return out;
+    return uniqKeys
+      .map((key) => {
+        const relativePath = key.startsWith(folder.path) ? key.slice(folder.path.length) : key;
+        const cleanRelativePath = relativePath.replace(/^\/+/, '');
+        const url = signedUrlMap[key];
+        if (!cleanRelativePath || !url) return null;
+        return {
+          name: cleanRelativePath.split('/').pop() || cleanRelativePath,
+          url,
+          zipPath: `${folder.name}/${cleanRelativePath}`,
+        };
+      })
+      .filter((f): f is FileToDownload => Boolean(f));
   }, []);
 
   // 智能下载：支持子目录结构感知 + 可选只下载选中项
@@ -434,18 +474,7 @@ function GalleryContent() {
         filesToDownload = [...fromFiles, ...fromFolders];
       } else if (hasSubFolders) {
         // 保留子目录结构
-        const subFetchTasks = data.folders.map(async (folder: GalleryFolder) => {
-          const res = await fetch(`/api/gallery?path=${encodeURIComponent(folder.path)}&json=1`, { signal });
-          const json = await res.json();
-          if (json.success) {
-            return (json.data.files as GalleryFile[]).map((f) => ({
-              name: f.name,
-              url: f.url,
-              zipPath: `${folder.name}/${f.name}`,
-            }));
-          }
-          return [];
-        });
+        const subFetchTasks = data.folders.map((folder: GalleryFolder) => collectFolderFilesForZip(folder, signal));
         // 当前路径下的直接文件
         const directFiles = data.files.map((f) => ({ name: f.name, url: f.url, zipPath: f.name }));
         const nested = (await Promise.all(subFetchTasks)).flat();
