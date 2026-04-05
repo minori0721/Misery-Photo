@@ -63,19 +63,18 @@ function parseS3ListXml(xmlString: string, path: string) {
   }
 
   const prefixes = Array.from(xml.getElementsByTagName('CommonPrefixes'));
-  const folders: GalleryFolder[] = prefixes
-    .map((cp) => {
-      const folderPath = textContent(cp, 'Prefix');
-      const folderName = folderPath.replace(path, '').replace(/\/$/, '');
-      if (!folderPath || !folderName) return null;
-      return {
-        name: folderName,
-        path: folderPath,
-        type: 'folder' as const,
-        previews: [],
-      };
-    })
-    .filter((f): f is GalleryFolder => Boolean(f));
+  const folders: GalleryFolder[] = [];
+  for (const cp of prefixes) {
+    const folderPath = textContent(cp, 'Prefix');
+    const folderName = folderPath.replace(path, '').replace(/\/$/, '');
+    if (!folderPath || !folderName) continue;
+    folders.push({
+      name: folderName,
+      path: folderPath,
+      type: 'folder',
+      previews: [],
+    });
+  }
 
   const contents = Array.from(xml.getElementsByTagName('Contents'));
   const filesMeta = contents
