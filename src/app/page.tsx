@@ -68,6 +68,10 @@ function GalleryContent() {
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
+  // 下载终止控制器
+  const abortControllerRef = useState<AbortController | null>(null)[0];
+  const [activeAbortController, setActiveAbortController] = useState<AbortController | null>(null);
+
   // 多选模式
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
@@ -92,6 +96,15 @@ function GalleryContent() {
     window.addEventListener('scroll', handleScroll);
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
+
+  // 页面卸载或路径切换时，自动取消正在进行的下载请求
+  useEffect(() => {
+    return () => {
+      if (activeAbortController) {
+        activeAbortController.abort();
+      }
+    };
+  }, [activeAbortController]);
 
   const scrollToTop = () => window.scrollTo({ top: 0, behavior: 'smooth' });
 
@@ -156,14 +169,34 @@ function GalleryContent() {
     setSelectedItems(new Set());
   };
 
+  // 取消下载
+  const cancelDownload = () => {
+    if (activeAbortController) {
+      activeAbortController.abort();
+      setActiveAbortController(null);
+      setDownloading(false);
+      addToast('下载已取消', 'info');
+    }
+  };
+
   // 智能下载：支持子目录结构感知 + 可选只下载选中项
   const handleDownloadZip = async (overrideFiles?: any[]) => {
+    const controller = new AbortController();
+    setActiveAbortController(controller);
     setDownloading(true);
     setDownloadProgress(0);
+    
+    // 如果是多选触发，立即退出多选模式
+    if (overrideFiles) {
+      exitSelectionMode();
+    }
+
     const zip = new JSZip();
     const folderName = currentPath.split('/').filter(Boolean).pop() || 'gallery-export';
 
     try {
+      const signal = controller.signal;
+
       // 若当前路径下有子画集，递归获取结构
       const hasSubFolders = data.folders.length > 0 && !overrideFiles;
       let filesToDownload: { name: string; url: string; zipPath: string }[] = [];
@@ -174,7 +207,7 @@ function GalleryContent() {
       } else if (hasSubFolders) {
         // 保留子目录结构
         const subFetchTasks = data.folders.map(async (folder: any) => {
-          const res = await fetch(`/api/gallery?path=${encodeURIComponent(folder.path)}`);
+          const res = await fetch(`/api/gallery?path=${encodeURIComponent(folder.path)}`, { signal });
           const json = await res.json();
           if (json.success) {
             return (json.data.files as any[]).map((f: any) => ({
@@ -194,20 +227,34 @@ function GalleryContent() {
         filesToDownload = data.files.map((f: any) => ({ name: f.name, url: f.url, zipPath: f.name }));
       }
 
-      if (filesToDownload.length === 0) { setDownloading(false); return; }
+      if (filesToDownload.length === 0) { 
+        setDownloading(false); 
+        setActiveAbortController(null);
+        return; 
+      }
 
       let completed = 0;
       const total = filesToDownload.length;
+      
+      // 并发下载逻辑 (v0.6.0 支持 AbortSignal)
       for (let i = 0; i < filesToDownload.length; i += 5) {
+        if (signal.aborted) break;
         const chunk = filesToDownload.slice(i, i + 5);
         await Promise.all(chunk.map(async (file) => {
-          const res = await fetch(`/api/proxy?url=${encodeURIComponent(file.url)}`);
-          const blob = await res.blob();
-          zip.file(file.zipPath, blob);
-          completed++;
-          setDownloadProgress(Math.round((completed / total) * 100));
+          try {
+            const res = await fetch(`/api/proxy?url=${encodeURIComponent(file.url)}`, { signal });
+            const blob = await res.blob();
+            zip.file(file.zipPath, blob);
+            completed++;
+            setDownloadProgress(Math.round((completed / total) * 100));
+          } catch (err: any) {
+            if (err.name === 'AbortError') throw err;
+            console.error(`Failed to download ${file.name}`, err);
+          }
         }));
       }
+
+      if (signal.aborted) return;
 
       setDownloadProgress(100);
       const content = await zip.generateAsync({ type: 'blob' });
@@ -215,12 +262,18 @@ function GalleryContent() {
       link.href = URL.createObjectURL(content);
       link.download = `${folderName}.zip`;
       link.click();
-    } catch (err) {
-      console.error('Download error:', err);
-      addToast('打包下载失败', 'error');
+      addToast('打包下载成功', 'success');
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        console.log('Download aborted by user');
+      } else {
+        console.error('Download error:', err);
+        addToast('打包下载失败', 'error');
+      }
     } finally {
       setDownloading(false);
       setDownloadProgress(0);
+      setActiveAbortController(null);
     }
   };
 
@@ -356,22 +409,50 @@ function GalleryContent() {
         currentPath={currentPath}
       />
 
-      {/* 下载进度条 */}
+      {/* 下载进度条 - v0.6.0 重构支持取消与主题适配 */}
       <AnimatePresence>
         {downloading && (
           <motion.div
             initial={{ y: 100, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 100, opacity: 0 }}
-            className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[60] w-full max-w-sm"
+            className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[100] w-full max-w-sm"
           >
-            <div className="mx-4 bg-[#111] border border-white/10 backdrop-blur-xl p-4 rounded-2xl shadow-2xl flex items-center space-x-4">
-              <Loader2 className={`w-5 h-5 animate-spin ${settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-purple-500'}`} />
+            <div className={`mx-4 border backdrop-blur-3xl p-4 rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.3)] flex items-center space-x-4 ${
+              settings.theme === 'miku' ? 'bg-white/90 border-[#39C5BB]/20' : 'bg-[#111]/90 border-white/10'
+            }`}>
+              <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 ${
+                settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-purple-500/10 text-purple-500'
+              }`}>
+                <Loader2 className="w-5 h-5 animate-spin" />
+              </div>
+              
               <div className="flex-1">
-                <p className="text-[10px] uppercase tracking-widest font-black text-white/40 mb-1">正在打包图集...</p>
-                <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
-                  <motion.div initial={{ width: 0 }} animate={{ width: `${downloadProgress}%` }} className={`h-full ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-purple-500'}`} />
+                <div className="flex justify-between items-end mb-1.5">
+                  <p className={`text-[10px] uppercase tracking-widest font-black ${
+                    settings.theme === 'miku' ? 'text-slate-400' : 'text-white/40'
+                  }`}>正在下载图集...</p>
+                  <span className={`text-xs font-bold font-mono ${
+                    settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-white'
+                  }`}>{downloadProgress}%</span>
+                </div>
+                <div className={`h-1.5 w-full rounded-full overflow-hidden ${
+                  settings.theme === 'miku' ? 'bg-slate-100' : 'bg-white/5'
+                }`}>
+                  <motion.div 
+                    initial={{ width: 0 }} 
+                    animate={{ width: `${downloadProgress}%` }} 
+                    className={`h-full ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-gradient-to-r from-purple-600 to-blue-600'}`} 
+                  />
                 </div>
               </div>
-              <span className="text-xs font-bold w-8 text-right font-mono">{downloadProgress}%</span>
+
+              <button 
+                onClick={cancelDownload}
+                className={`p-2 rounded-xl transition-all hover:scale-110 active:scale-95 ${
+                  settings.theme === 'miku' ? 'bg-slate-100 hover:bg-red-50 text-slate-400 hover:text-red-500' : 'bg-white/5 hover:bg-red-500/10 text-white/30 hover:text-red-400'
+                }`}
+              >
+                <XIcon size={16} />
+              </button>
             </div>
           </motion.div>
         )}
