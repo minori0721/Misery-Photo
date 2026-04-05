@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Folder, Loader2, ArrowRight } from 'lucide-react';
 import { ISettings } from '@/lib/useSettings';
@@ -22,6 +23,7 @@ export default function TargetPickerModal({
   settings,
   currentPath,
 }: TargetPickerModalProps) {
+  const router = useRouter();
   const [folders, setFolders] = useState<{ name: string; path: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<string>('');
@@ -34,7 +36,14 @@ export default function TargetPickerModal({
     setSelected('');
     setLoading(true);
     fetch('/api/gallery?path=&json=1&foldersOnly=1')
-      .then(r => r.json())
+      .then(async (r) => {
+        const data = await r.json();
+        if (r.status === 401) {
+          router.push('/login');
+          return { success: false };
+        }
+        return data;
+      })
       .then(data => {
         if (data.success) {
           // 排除当前所在目录，避免移动到自己
@@ -44,8 +53,8 @@ export default function TargetPickerModal({
           setFolders([{ name: '📁 根目录', path: '' }, ...all]);
         }
       })
-      .finally(() => setLoading(false));
-  }, [isOpen, currentPath]);
+        .finally(() => setLoading(false));
+      }, [isOpen, currentPath, router]);
 
   if (!isOpen) return null;
 
