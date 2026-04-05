@@ -2,12 +2,12 @@
 
 import { useState, useEffect, useCallback, Suspense } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Folder, 
-  Image as ImageIcon, 
-  ChevronRight, 
-  Upload, 
-  Download, 
+import {
+  Folder,
+  Image as ImageIcon,
+  ChevronRight,
+  Upload,
+  Download,
   LogOut,
   Loader2,
   HardDrive,
@@ -22,6 +22,7 @@ import {
   Copy,
   CheckCircle2,
   XCircle,
+  AlertCircle,
   X as XIcon,
 } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -56,7 +57,7 @@ function GalleryContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const currentPath = searchParams.get('path') || '';
-  
+
   const [data, setData] = useState<any>({ folders: [], files: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -97,6 +98,7 @@ function GalleryContent() {
   // 获取文件列表
   const fetchGallery = async (path: string) => {
     setLoading(true);
+    setError(''); // 每次开始获取前重置错误状态
     try {
       const res = await fetch(`/api/gallery?path=${encodeURIComponent(path)}`);
       const json = await res.json();
@@ -105,8 +107,8 @@ function GalleryContent() {
       } else {
         setError(json.message);
       }
-    } catch (err) {
-      setError('获取数据失败');
+    } catch (err: any) {
+      setError(err.message || '获取数据失败');
     } finally {
       setLoading(false);
     }
@@ -274,8 +276,8 @@ function GalleryContent() {
   };
 
   const handleLogout = () => {
-     document.cookie = "nebula_session=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
-     router.push('/login');
+    document.cookie = "nebula_session=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+    router.push('/login');
   };
 
   const handleDelete = async (path: string, type: 'image' | 'folder') => {
@@ -312,11 +314,10 @@ function GalleryContent() {
   const allKeys = [...data.folders.map((f: any) => f.path), ...data.files.map((f: any) => f.path)];
 
   return (
-    <div className={`min-h-screen selection:bg-purple-500/30 transition-colors duration-1000 ${
-      settings.theme === 'miku' 
+    <div className={`min-h-screen selection:bg-purple-500/30 transition-colors duration-1000 ${settings.theme === 'miku'
         ? (viewMode === 'manga' ? 'bg-[#f0f4f8] text-slate-800 bg-fixed' : 'bg-[#fafcff] text-slate-800')
         : (viewMode === 'manga' ? 'bg-gradient-to-br from-[#1b1429] via-[#050505] to-[#0c1838] bg-fixed text-white' : 'bg-[#050505] text-white')
-    }`}>
+      }`}>
       {/* Toast 通知层 */}
       <div className="fixed top-6 right-6 z-[200] space-y-2 pointer-events-none">
         <AnimatePresence>
@@ -326,13 +327,12 @@ function GalleryContent() {
               initial={{ opacity: 0, x: 60, scale: 0.9 }}
               animate={{ opacity: 1, x: 0, scale: 1 }}
               exit={{ opacity: 0, x: 60, scale: 0.9 }}
-              className={`flex items-center space-x-2 px-4 py-3 rounded-2xl shadow-2xl text-sm font-bold pointer-events-auto backdrop-blur-xl border ${
-                t.type === 'success'
+              className={`flex items-center space-x-2 px-4 py-3 rounded-2xl shadow-2xl text-sm font-bold pointer-events-auto backdrop-blur-xl border ${t.type === 'success'
                   ? (settings.theme === 'miku' ? 'bg-[#39C5BB]/10 border-[#39C5BB]/30 text-[#2a9a92]' : 'bg-green-500/10 border-green-500/30 text-green-400')
                   : t.type === 'error'
-                  ? 'bg-red-500/10 border-red-500/30 text-red-400'
-                  : (settings.theme === 'miku' ? 'bg-white/90 border-slate-200 text-slate-700' : 'bg-white/10 border-white/20 text-white')
-              }`}
+                    ? 'bg-red-500/10 border-red-500/30 text-red-400'
+                    : (settings.theme === 'miku' ? 'bg-white/90 border-slate-200 text-slate-700' : 'bg-white/10 border-white/20 text-white')
+                }`}
             >
               {t.type === 'success' ? <CheckCircle2 size={14} /> : t.type === 'error' ? <XCircle size={14} /> : <Loader2 size={14} className="animate-spin" />}
               <span>{t.message}</span>
@@ -341,16 +341,16 @@ function GalleryContent() {
         </AnimatePresence>
       </div>
 
-      <SettingsModal 
-        isOpen={isSettingsOpen} 
-        onClose={() => setIsSettingsOpen(false)} 
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
         settings={settings}
         updateSettings={updateSettings}
       />
 
-      <UploadModal 
-        isOpen={isUploadOpen} 
-        onClose={() => setIsUploadOpen(false)} 
+      <UploadModal
+        isOpen={isUploadOpen}
+        onClose={() => setIsUploadOpen(false)}
         currentPath={currentPath}
         onRefresh={() => fetchGallery(currentPath)}
       />
@@ -367,20 +367,20 @@ function GalleryContent() {
       {/* 下载进度条 */}
       <AnimatePresence>
         {downloading && (
-          <motion.div 
+          <motion.div
             initial={{ y: 100, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 100, opacity: 0 }}
             className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[60] w-full max-w-sm"
           >
-              <div className="mx-4 bg-[#111] border border-white/10 backdrop-blur-xl p-4 rounded-2xl shadow-2xl flex items-center space-x-4">
-                 <Loader2 className={`w-5 h-5 animate-spin ${settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-purple-500'}`} />
-                 <div className="flex-1">
-                    <p className="text-[10px] uppercase tracking-widest font-black text-white/40 mb-1">正在打包图集...</p>
-                    <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
-                       <motion.div initial={{ width: 0 }} animate={{ width: `${downloadProgress}%` }} className={`h-full ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-purple-500'}`} />
-                    </div>
+            <div className="mx-4 bg-[#111] border border-white/10 backdrop-blur-xl p-4 rounded-2xl shadow-2xl flex items-center space-x-4">
+              <Loader2 className={`w-5 h-5 animate-spin ${settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-purple-500'}`} />
+              <div className="flex-1">
+                <p className="text-[10px] uppercase tracking-widest font-black text-white/40 mb-1">正在打包图集...</p>
+                <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
+                  <motion.div initial={{ width: 0 }} animate={{ width: `${downloadProgress}%` }} className={`h-full ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-purple-500'}`} />
                 </div>
-                <span className="text-xs font-bold w-8 text-right font-mono">{downloadProgress}%</span>
-             </div>
+              </div>
+              <span className="text-xs font-bold w-8 text-right font-mono">{downloadProgress}%</span>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -419,7 +419,7 @@ function GalleryContent() {
             >
               <Settings2 size={20} />
             </button>
-            <button 
+            <button
               onClick={() => setIsUploadOpen(true)}
               className={`px-3 md:px-5 py-2 rounded-xl transition-all flex items-center space-x-2 text-xs font-black uppercase ${settings.theme === 'miku' ? 'bg-[#39C5BB] text-white hover:bg-[#2eaa9e]' : 'bg-white text-black hover:bg-white/90'}`}
             >
@@ -448,44 +448,42 @@ function GalleryContent() {
           </nav>
 
           <div className={`flex items-center space-x-2 p-1 rounded-2xl border ${settings.theme === 'miku' ? 'bg-white border-[#39C5BB]/20 shadow-sm' : 'bg-white/5 border-white/5'}`}>
-             {!selectionMode ? (
-               <>
-                 <button 
+            {!selectionMode ? (
+              <>
+                <button
                   onClick={() => setViewMode('grid')}
                   className={`p-2 rounded-xl transition-all ${viewMode === 'grid' ? (settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-white/10 text-white shadow-xl') : (settings.theme === 'miku' ? 'text-slate-400 hover:text-slate-600' : 'text-white/30 hover:text-white/60')}`}
-                 >
-                    <LayoutGrid size={18} />
-                 </button>
-                 <button 
+                >
+                  <LayoutGrid size={18} />
+                </button>
+                <button
                   onClick={() => setViewMode('manga')}
                   className={`p-2 rounded-xl transition-all ${viewMode === 'manga' ? (settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-white/10 text-white shadow-xl') : (settings.theme === 'miku' ? 'text-slate-400 hover:text-slate-600' : 'text-white/30 hover:text-white/60')}`}
-                 >
-                    <Rows size={18} />
-                 </button>
-                 <div className={`w-[1px] h-4 mx-1 ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`} />
-                 <button onClick={() => handleDownloadZip()} title="下载所有内容" className={`p-2 transition-colors ${settings.theme === 'miku' ? 'text-slate-400 hover:text-[#39C5BB]' : 'text-white/30 hover:text-blue-400'}`}><Download size={18} /></button>
-                 <div className={`w-[1px] h-4 mx-1 ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`} />
-                 <button
-                   onClick={() => setSelectionMode(true)}
-                   title="多选模式"
-                   className={`p-2 rounded-xl transition-all ${settings.theme === 'miku' ? 'text-slate-400 hover:text-[#39C5BB] hover:bg-[#39C5BB]/10' : 'text-white/30 hover:text-white/70 hover:bg-white/10'}`}
-                 >
-                   <CheckSquare size={18} />
-                 </button>
-               </>
-             ) : (
-               <>
-                 <button onClick={toggleSelectAll} className={`px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all ${
-                   settings.theme === 'miku' ? 'text-[#39C5BB] hover:bg-[#39C5BB]/10' : 'text-purple-400 hover:bg-purple-500/10'
-                 }`}>
-                   {selectedItems.size === allKeys.length ? '取消全选' : '全选'}
-                 </button>
-                 <div className={`w-[1px] h-4 ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`} />
-                 <button onClick={exitSelectionMode} className={`p-2 rounded-xl transition-all ${
-                   settings.theme === 'miku' ? 'text-slate-500 hover:text-red-500 hover:bg-red-50' : 'text-white/40 hover:text-red-400 hover:bg-red-500/10'
-                 }`}><XIcon size={18} /></button>
-               </>
-             )}
+                >
+                  <Rows size={18} />
+                </button>
+                <div className={`w-[1px] h-4 mx-1 ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`} />
+                <button onClick={() => handleDownloadZip()} title="下载所有内容" className={`p-2 transition-colors ${settings.theme === 'miku' ? 'text-slate-400 hover:text-[#39C5BB]' : 'text-white/30 hover:text-blue-400'}`}><Download size={18} /></button>
+                <div className={`w-[1px] h-4 mx-1 ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`} />
+                <button
+                  onClick={() => setSelectionMode(true)}
+                  title="多选模式"
+                  className={`p-2 rounded-xl transition-all ${settings.theme === 'miku' ? 'text-slate-400 hover:text-[#39C5BB] hover:bg-[#39C5BB]/10' : 'text-white/30 hover:text-white/70 hover:bg-white/10'}`}
+                >
+                  <CheckSquare size={18} />
+                </button>
+              </>
+            ) : (
+              <>
+                <button onClick={toggleSelectAll} className={`px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all ${settings.theme === 'miku' ? 'text-[#39C5BB] hover:bg-[#39C5BB]/10' : 'text-purple-400 hover:bg-purple-500/10'
+                  }`}>
+                  {selectedItems.size === allKeys.length ? '取消全选' : '全选'}
+                </button>
+                <div className={`w-[1px] h-4 ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`} />
+                <button onClick={exitSelectionMode} className={`p-2 rounded-xl transition-all ${settings.theme === 'miku' ? 'text-slate-500 hover:text-red-500 hover:bg-red-50' : 'text-white/40 hover:text-red-400 hover:bg-red-500/10'
+                  }`}><XIcon size={18} /></button>
+              </>
+            )}
           </div>
         </div>
 
@@ -495,19 +493,38 @@ function GalleryContent() {
             <p className={`text-xs font-black uppercase tracking-[4px] ${settings.theme === 'miku' ? 'text-slate-400' : 'text-white/20'}`}>正在同步云端数据...</p>
           </div>
         ) : (
-          <motion.div 
+          <motion.div
             variants={containerVariants}
             initial="hidden"
             animate="show"
             className={viewMode === 'grid' ? `grid ${settings.mobileCols === 2 ? 'grid-cols-2' : 'grid-cols-1'} md:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-3 md:gap-6` : `max-w-4xl mx-auto space-y-0 shadow-2xl rounded-2xl overflow-hidden backdrop-blur-3xl border ${settings.theme === 'miku' ? 'bg-white/40 border-[#39C5BB]/20' : 'bg-black/40 border-white/5'}`}
           >
             <AnimatePresence mode="popLayout">
+              {/* 错误提示区域 */}
+              {error && (
+                <div className="col-span-full py-32 text-center flex flex-col items-center justify-center space-y-4">
+                   <div className="w-16 h-16 rounded-3xl bg-red-500/10 flex items-center justify-center text-red-500 mb-2">
+                      <AlertCircle size={32} />
+                   </div>
+                   <p className="text-sm font-black uppercase tracking-[2px] text-red-400">连接 OSS 服务器失败</p>
+                   <p className={`text-xs opacity-40 max-w-md mx-auto font-mono px-4 ${settings.theme === 'miku' ? 'text-slate-900' : 'text-white'}`}>{error}</p>
+                   <button 
+                    onClick={() => fetchGallery(currentPath)}
+                    className={`mt-4 px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all active:scale-95 shadow-lg ${
+                      settings.theme === 'miku' ? 'bg-[#39C5BB] text-white shadow-[#39C5BB]/30' : 'bg-white text-black hover:bg-white/90 shadow-white/10'
+                    }`}
+                   >
+                    重试连接
+                   </button>
+                </div>
+              )}
+
               {/* 文件夹显示区域 */}
-              {viewMode === 'grid' && data.folders.map((folder: any) => (
-                <FolderCard 
-                  key={folder.path} 
-                  folder={folder} 
-                  onClick={() => selectionMode ? toggleSelection(folder.path) : handleFolderClick(folder.path)} 
+              {!error && viewMode === 'grid' && data.folders.map((folder: any) => (
+                <FolderCard
+                  key={folder.path}
+                  folder={folder}
+                  onClick={() => selectionMode ? toggleSelection(folder.path) : handleFolderClick(folder.path)}
                   onDelete={() => handleDelete(folder.path, 'folder')}
                   settings={settings}
                   selectionMode={selectionMode}
@@ -516,17 +533,16 @@ function GalleryContent() {
               ))}
 
               {/* 文件显示区域 */}
-              {data.files.map((file: any) => (
+              {!error && data.files.map((file: any) => (
                 <motion.div
-                  key={file.path} 
+                  key={file.path}
                   variants={itemVariants}
                   layout
                   onClick={() => { if (selectionMode) toggleSelection(file.path); }}
-                  className={viewMode === 'grid' ? 
-                    `group relative rounded-3xl overflow-hidden transition-all duration-500 border aspect-[3/4] ${
-                      selectionMode && selectedItems.has(file.path)
-                        ? (settings.theme === 'miku' ? 'border-[#39C5BB] shadow-[0_0_0_3px_rgba(57,197,187,0.3)] bg-white' : 'border-purple-500 shadow-[0_0_0_3px_rgba(168,85,247,0.3)] bg-[#090909]')
-                        : settings.theme === 'miku'
+                  className={viewMode === 'grid' ?
+                    `group relative rounded-3xl overflow-hidden transition-all duration-500 border aspect-[3/4] ${selectionMode && selectedItems.has(file.path)
+                      ? (settings.theme === 'miku' ? 'border-[#39C5BB] shadow-[0_0_0_3px_rgba(57,197,187,0.3)] bg-white' : 'border-purple-500 shadow-[0_0_0_3px_rgba(168,85,247,0.3)] bg-[#090909]')
+                      : settings.theme === 'miku'
                         ? 'bg-white border-[#39C5BB]/20 hover:border-[#39C5BB] hover:shadow-[0_10px_30px_rgba(57,197,187,0.15)]'
                         : 'bg-[#090909] border-white/10 hover:border-purple-500/50 hover:shadow-[0_0_30px_rgba(147,51,234,0.15)]'
                     }` :
@@ -536,11 +552,10 @@ function GalleryContent() {
                   {/* 多选 Checkbox */}
                   {selectionMode && viewMode === 'grid' && (
                     <div className="absolute top-3 left-3 z-20">
-                      <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
-                        selectedItems.has(file.path)
+                      <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${selectedItems.has(file.path)
                           ? (settings.theme === 'miku' ? 'bg-[#39C5BB] border-[#39C5BB]' : 'bg-purple-500 border-purple-500')
                           : 'bg-black/30 border-white/60 backdrop-blur-sm'
-                      }`}>
+                        }`}>
                         {selectedItems.has(file.path) && <CheckSquare size={12} className="text-white" />}
                       </div>
                     </div>
@@ -548,14 +563,14 @@ function GalleryContent() {
                   <div className={`${viewMode === 'grid' ? "w-full h-full relative overflow-hidden" : "w-full"} min-h-[300px] overflow-hidden flex items-center justify-center transition-all duration-300 relative`}>
                     {/* 加载骨架屏背景 */}
                     <div className={`absolute inset-0 animate-pulse ${settings.theme === 'miku' ? 'bg-slate-100' : 'bg-white/5'}`} />
-                    
-                    <img 
-                      src={`/api/proxy?url=${encodeURIComponent(file.url)}&thumbnail=${viewMode === 'grid'}`} 
-                      alt={file.name} 
-                      loading="lazy" 
-                      className={viewMode === 'grid' 
-                        ? "w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium relative z-10" 
-                        : "w-full h-auto select-none relative z-10"} 
+
+                    <img
+                      src={`/api/proxy?url=${encodeURIComponent(file.url)}&thumbnail=${viewMode === 'grid'}`}
+                      alt={file.name}
+                      loading="lazy"
+                      className={viewMode === 'grid'
+                        ? "w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium relative z-10"
+                        : "w-full h-auto select-none relative z-10"}
                       onLoad={(e) => {
                         const target = e.target as HTMLImageElement;
                         target.parentElement?.style.setProperty('min-height', 'auto');
@@ -563,14 +578,14 @@ function GalleryContent() {
                         if (skeleton) (skeleton as HTMLElement).style.opacity = '0';
                       }}
                     />
-                    
+
                     {/* 网格模式下的操作层 */}
                     {viewMode === 'grid' && (
                       <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-all flex flex-col justify-between p-4 z-20">
                         <div className="flex justify-end">
-                           <button onClick={() => handleDelete(file.path, 'image')} className="p-2 bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-all shadow-xl">
-                              <Trash2 size={16} />
-                           </button>
+                          <button onClick={() => handleDelete(file.path, 'image')} className="p-2 bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-all shadow-xl">
+                            <Trash2 size={16} />
+                          </button>
                         </div>
                         <a href={file.url} download={file.name} className="w-full py-2 bg-white text-black rounded-xl text-[10px] font-black uppercase tracking-widest text-center">下载原图</a>
                       </div>
@@ -578,15 +593,15 @@ function GalleryContent() {
 
                     {/* 漫画模式下的悬停管理 */}
                     {viewMode === 'manga' && (
-                       <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity z-20">
-                         <button onClick={() => handleDelete(file.path, 'image')} className="p-3 bg-black/60 backdrop-blur-md rounded-full text-red-500 border border-white/10 shadow-2xl">
-                            <Trash2 size={24} />
-                         </button>
-                       </div>
+                      <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity z-20">
+                        <button onClick={() => handleDelete(file.path, 'image')} className="p-3 bg-black/60 backdrop-blur-md rounded-full text-red-500 border border-white/10 shadow-2xl">
+                          <Trash2 size={24} />
+                        </button>
+                      </div>
                     )}
                   </div>
-                  
-                    {/* 网格模式下的信息盖板(悬浮透明风格) */}
+
+                  {/* 网格模式下的信息盖板(悬浮透明风格) */}
                   {viewMode === 'grid' && (
                     <div className="absolute inset-x-0 bottom-0 p-3 pt-6 bg-gradient-to-t from-black/80 via-black/40 to-transparent pointer-events-none">
                       <div className="backdrop-blur-md bg-black/20 border border-white/10 rounded-xl p-2 px-3 flex items-center justify-between pointer-events-auto">
@@ -602,9 +617,9 @@ function GalleryContent() {
               ))}
             </AnimatePresence>
 
-            {!loading && data.folders.length === 0 && data.files.length === 0 && (
+            {!loading && !error && data.folders.length === 0 && data.files.length === 0 && (
               <div className="col-span-full py-40 text-center opacity-40">
-                 <p className="text-sm font-black uppercase tracking-[4px]">内容仓库空空如也</p>
+                <p className="text-sm font-black uppercase tracking-[4px]">内容仓库空空如也</p>
               </div>
             )}
           </motion.div>
@@ -620,12 +635,10 @@ function GalleryContent() {
             exit={{ y: 100, opacity: 0 }}
             className="fixed bottom-0 left-0 right-0 z-[80] p-4"
           >
-            <div className={`max-w-lg mx-auto rounded-3xl border p-4 shadow-2xl backdrop-blur-xl flex items-center justify-between gap-3 ${
-              settings.theme === 'miku' ? 'bg-white/90 border-[#39C5BB]/30' : 'bg-[#111]/90 border-white/10'
-            }`}>
-              <span className={`text-sm font-black shrink-0 ${
-                settings.theme === 'miku' ? 'text-slate-700' : 'text-white'
+            <div className={`max-w-lg mx-auto rounded-3xl border p-4 shadow-2xl backdrop-blur-xl flex items-center justify-between gap-3 ${settings.theme === 'miku' ? 'bg-white/90 border-[#39C5BB]/30' : 'bg-[#111]/90 border-white/10'
               }`}>
+              <span className={`text-sm font-black shrink-0 ${settings.theme === 'miku' ? 'text-slate-700' : 'text-white'
+                }`}>
                 已选 <span style={{ color: settings.theme === 'miku' ? '#39C5BB' : '#a855f7' }}>{selectedItems.size}</span> 项
               </span>
               <div className="flex items-center gap-2">
@@ -633,9 +646,8 @@ function GalleryContent() {
                   onClick={handleBatchDownload}
                   disabled={selectedItems.size === 0}
                   title="下载选中"
-                  className={`p-2.5 rounded-2xl transition-all disabled:opacity-30 ${
-                    settings.theme === 'miku' ? 'bg-slate-100 hover:bg-[#39C5BB]/10 text-slate-500 hover:text-[#39C5BB]' : 'bg-white/5 hover:bg-white/10 text-white/50 hover:text-white'
-                  }`}
+                  className={`p-2.5 rounded-2xl transition-all disabled:opacity-30 ${settings.theme === 'miku' ? 'bg-slate-100 hover:bg-[#39C5BB]/10 text-slate-500 hover:text-[#39C5BB]' : 'bg-white/5 hover:bg-white/10 text-white/50 hover:text-white'
+                    }`}
                 >
                   <Download size={17} />
                 </button>
@@ -643,9 +655,8 @@ function GalleryContent() {
                   onClick={() => setPendingAction('copy')}
                   disabled={selectedItems.size === 0}
                   title="复制到"
-                  className={`p-2.5 rounded-2xl transition-all disabled:opacity-30 ${
-                    settings.theme === 'miku' ? 'bg-slate-100 hover:bg-[#39C5BB]/10 text-slate-500 hover:text-[#39C5BB]' : 'bg-white/5 hover:bg-white/10 text-white/50 hover:text-white'
-                  }`}
+                  className={`p-2.5 rounded-2xl transition-all disabled:opacity-30 ${settings.theme === 'miku' ? 'bg-slate-100 hover:bg-[#39C5BB]/10 text-slate-500 hover:text-[#39C5BB]' : 'bg-white/5 hover:bg-white/10 text-white/50 hover:text-white'
+                    }`}
                 >
                   <Copy size={17} />
                 </button>
@@ -653,9 +664,8 @@ function GalleryContent() {
                   onClick={() => setPendingAction('move')}
                   disabled={selectedItems.size === 0}
                   title="移动到"
-                  className={`p-2.5 rounded-2xl transition-all disabled:opacity-30 ${
-                    settings.theme === 'miku' ? 'bg-slate-100 hover:bg-[#39C5BB]/10 text-slate-500 hover:text-[#39C5BB]' : 'bg-white/5 hover:bg-white/10 text-white/50 hover:text-white'
-                  }`}
+                  className={`p-2.5 rounded-2xl transition-all disabled:opacity-30 ${settings.theme === 'miku' ? 'bg-slate-100 hover:bg-[#39C5BB]/10 text-slate-500 hover:text-[#39C5BB]' : 'bg-white/5 hover:bg-white/10 text-white/50 hover:text-white'
+                    }`}
                 >
                   <Scissors size={17} />
                 </button>
@@ -690,7 +700,7 @@ export default function GalleryPage() {
 }
 
 // 文件夹卡片组件：支持悬停幻灯片
-function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSelected }: { 
+function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSelected }: {
   folder: any; onClick: () => void; onDelete: () => void; settings: ISettings;
   selectionMode?: boolean; isSelected?: boolean;
 }) {
@@ -710,28 +720,26 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
   return (
     <motion.div
       whileHover={{ y: selectionMode ? 0 : -6 }}
-      className={`group relative rounded-3xl overflow-hidden transition-all duration-300 border aspect-[3/4] ${
-        isSelected
+      className={`group relative rounded-3xl overflow-hidden transition-all duration-300 border aspect-[3/4] ${isSelected
           ? (settings.theme === 'miku' ? 'border-[#39C5BB] shadow-[0_0_0_3px_rgba(57,197,187,0.3)] bg-white' : 'border-purple-500 shadow-[0_0_0_3px_rgba(168,85,247,0.3)] bg-[#090909]')
-          : settings.theme === 'miku' 
-          ? 'bg-white border-[#39C5BB]/20 hover:border-[#39C5BB] hover:shadow-[0_10px_40px_rgba(57,197,187,0.2)]'
-          : 'bg-[#090909] border-white/10 hover:border-purple-500/50 hover:shadow-[0_10px_40px_rgba(147,51,234,0.15)]'
-      }`}
+          : settings.theme === 'miku'
+            ? 'bg-white border-[#39C5BB]/20 hover:border-[#39C5BB] hover:shadow-[0_10px_40px_rgba(57,197,187,0.2)]'
+            : 'bg-[#090909] border-white/10 hover:border-purple-500/50 hover:shadow-[0_10px_40px_rgba(147,51,234,0.15)]'
+        }`}
     >
       {/* 多选 Checkbox */}
       {selectionMode && (
         <div className="absolute top-3 left-3 z-20">
-          <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
-            isSelected
+          <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${isSelected
               ? (settings.theme === 'miku' ? 'bg-[#39C5BB] border-[#39C5BB]' : 'bg-purple-500 border-purple-500')
               : 'bg-black/30 border-white/60 backdrop-blur-sm'
-          }`}>
+            }`}>
             {isSelected && <CheckSquare size={12} className="text-white" />}
           </div>
         </div>
       )}
-      <div 
-        onClick={onClick} 
+      <div
+        onClick={onClick}
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => { setIsHovered(false); setCurrentIdx(0); }}
         className={`w-full h-full relative cursor-pointer overflow-hidden ${settings.theme === 'miku' ? 'bg-slate-50' : 'bg-white/5'}`}
@@ -739,8 +747,8 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
         <AnimatePresence mode="wait">
           <motion.img
             key={folder.previews?.[currentIdx] || 'empty'}
-            src={folder.previews?.[currentIdx] 
-              ? `/api/proxy?url=${encodeURIComponent(folder.previews[currentIdx])}&thumbnail=true` 
+            src={folder.previews?.[currentIdx]
+              ? `/api/proxy?url=${encodeURIComponent(folder.previews[currentIdx])}&thumbnail=true`
               : '/folder-placeholder.png'}
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
             transition={{ duration: 0.8 }}
@@ -748,7 +756,7 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
             onError={(e) => { (e.target as any).src = "https://placehold.co/400x300/111/555?text=Empty+Album"; }}
           />
         </AnimatePresence>
-        
+
         {/* 指示器 */}
         <div className="absolute bottom-16 left-1/2 -translate-x-1/2 flex space-x-1 pointer-events-none">
           {folder.previews?.map((_: any, i: number) => (
@@ -757,21 +765,21 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
         </div>
 
         <div className={`absolute inset-x-0 bottom-0 pointer-events-none p-3 pt-10 ${settings.theme === 'miku' ? 'bg-gradient-to-t from-black/60 via-black/20 to-transparent' : 'bg-gradient-to-t from-black/90 via-black/40 to-transparent'}`}>
-           <div className={`backdrop-blur-xl border rounded-2xl p-3 flex flex-col justify-end transition-all select-none pointer-events-auto ${settings.theme === 'miku' ? 'bg-white/10 border-white/20' : 'bg-black/40 border-white/10'}`}>
-              <div className="flex items-center justify-between mb-1">
-                 <p className="text-[14px] font-black tracking-tight truncate text-white uppercase" title={folder.name}>{folder.name}</p>
-                 <button onClick={(e) => { e.stopPropagation(); onDelete(); }} className="p-1.5 text-white/50 hover:text-red-400 hover:bg-black/40 rounded-lg transition-all opacity-0 group-hover:opacity-100 z-10">
-                    <Trash2 size={14} />
-                 </button>
-              </div>
-              <div className="flex items-center space-x-2">
-                 <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-purple-500'}`} />
-                 <p className="text-[9px] font-bold uppercase tracking-widest text-white/60">画册合集</p>
-              </div>
-           </div>
+          <div className={`backdrop-blur-xl border rounded-2xl p-3 flex flex-col justify-end transition-all select-none pointer-events-auto ${settings.theme === 'miku' ? 'bg-white/10 border-white/20' : 'bg-black/40 border-white/10'}`}>
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-[14px] font-black tracking-tight truncate text-white uppercase" title={folder.name}>{folder.name}</p>
+              <button onClick={(e) => { e.stopPropagation(); onDelete(); }} className="p-1.5 text-white/50 hover:text-red-400 hover:bg-black/40 rounded-lg transition-all opacity-0 group-hover:opacity-100 z-10">
+                <Trash2 size={14} />
+              </button>
+            </div>
+            <div className="flex items-center space-x-2">
+              <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-purple-500'}`} />
+              <p className="text-[9px] font-bold uppercase tracking-widest text-white/60">画册合集</p>
+            </div>
+          </div>
         </div>
       </div>
-      
+
       {/* 底部光晕 (由设置项控制开关) */}
       {settings.glow && (
         <div className={`absolute -bottom-10 left-1/2 -translate-x-1/2 w-2/3 h-10 blur-2xl rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none ${settings.theme === 'miku' ? 'bg-[#39C5BB]/40' : 'bg-purple-500/30'}`} />
@@ -779,4 +787,3 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
     </motion.div>
   );
 }
-
