@@ -1,14 +1,20 @@
 import { NextResponse } from 'next/server';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { s3Client, BUCKET_NAME } from '@/lib/s3';
 import { requireApiAuth } from '@/lib/auth';
 import { isValidStoragePath, toFolderPath } from '@/lib/validation';
+import { getBucketRuntimeFromRequest, noBucketConfiguredResponse } from '@/lib/bucket-config';
 
 export async function POST(request: Request) {
   try {
     const unauthorized = await requireApiAuth(request);
     if (unauthorized) return unauthorized;
+
+    const runtime = getBucketRuntimeFromRequest(request);
+    if (!runtime) return noBucketConfiguredResponse();
+
+    const s3Client = runtime.client;
+    const bucketName = runtime.bucketName;
 
     const { filename, path, contentType } = await request.json();
     if (typeof filename !== 'string' || filename.length === 0 || filename.length > 255) {
@@ -31,7 +37,7 @@ export async function POST(request: Request) {
     const key = `${toFolderPath(path)}${filename}`;
 
     const command = new PutObjectCommand({
-      Bucket: BUCKET_NAME,
+      Bucket: bucketName,
       Key: key,
       ContentType: contentType || 'application/octet-stream',
     });

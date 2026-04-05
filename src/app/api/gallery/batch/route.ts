@@ -4,10 +4,11 @@ import {
   DeleteObjectsCommand,
   ListObjectsV2Command,
   ListObjectsV2CommandOutput,
+  S3Client,
 } from '@aws-sdk/client-s3';
-import { s3Client, BUCKET_NAME } from '@/lib/s3';
 import { requireApiAuth } from '@/lib/auth';
 import { getPathBaseName, isValidStoragePath, toFolderPath, uniqStrings } from '@/lib/validation';
+import { getBucketRuntimeFromRequest, noBucketConfiguredResponse } from '@/lib/bucket-config';
 
 const MAX_BATCH_PATHS = 1000;
 const MAX_PATH_LENGTH = 1024;
@@ -19,13 +20,13 @@ async function runChunked<T>(items: T[], chunkSize: number, fn: (item: T) => Pro
   }
 }
 
-async function listFolderKeysRecursively(folderPath: string): Promise<string[]> {
+async function listFolderKeysRecursively(s3Client: S3Client, bucketName: string, folderPath: string): Promise<string[]> {
   const keys: string[] = [];
   let continuationToken: string | undefined = undefined;
 
   do {
     const command = new ListObjectsV2Command({
-      Bucket: BUCKET_NAME,
+      Bucket: bucketName,
       Prefix: folderPath,
       ContinuationToken: continuationToken,
     });
@@ -42,12 +43,12 @@ async function listFolderKeysRecursively(folderPath: string): Promise<string[]> 
   return keys;
 }
 
-async function resolveDeleteKeys(paths: string[]): Promise<string[]> {
+async function resolveDeleteKeys(s3Client: S3Client, bucketName: string, paths: string[]): Promise<string[]> {
   const allKeys: string[] = [];
   for (const rawPath of paths) {
     if (rawPath.endsWith('/')) {
       const folderPath = toFolderPath(rawPath);
-      const folderKeys = await listFolderKeysRecursively(folderPath);
+      const folderKeys = await listFolderKeysRecursively(s3Client, bucketName, folderPath);
       allKeys.push(...folderKeys);
     } else {
       allKeys.push(rawPath);
@@ -61,7 +62,7 @@ type CopyTask = {
   destKey: string;
 };
 
-async function resolveCopyTasks(paths: string[], dest: string): Promise<CopyTask[]> {
+async function resolveCopyTasks(s3Client: S3Client, bucketName: string, paths: string[], dest: string): Promise<CopyTask[]> {
   const destFolder = toFolderPath(dest);
   const tasks: CopyTask[] = [];
 
@@ -69,7 +70,7 @@ async function resolveCopyTasks(paths: string[], dest: string): Promise<CopyTask
     if (rawPath.endsWith('/')) {
       const folderPath = toFolderPath(rawPath);
       const folderName = getPathBaseName(folderPath);
-      const keys = await listFolderKeysRecursively(folderPath);
+      const keys = await listFolderKeysRecursively(s3Client, bucketName, folderPath);
       for (const key of keys) {
         const relative = key.slice(folderPath.length);
         if (!relative) continue;
@@ -95,6 +96,12 @@ export async function POST(request: Request) {
   try {
     const unauthorized = await requireApiAuth(request);
     if (unauthorized) return unauthorized;
+
+    const runtime = getBucketRuntimeFromRequest(request);
+    if (!runtime) return noBucketConfiguredResponse();
+
+    const s3Client = runtime.client;
+    const bucketName = runtime.bucketName;
 
     const { action, paths, dest } = await request.json() as {
       action: 'delete' | 'move' | 'copy';
@@ -139,7 +146,7 @@ export async function POST(request: Request) {
     // DELETE
     // ────────────────────────────────
     if (action === 'delete') {
-      const objectKeys = await resolveDeleteKeys(uniquePaths);
+      const objectKeys = await resolveDeleteKeys(s3Client, bucketName, uniquePaths);
       if (objectKeys.length === 0) {
         return NextResponse.json({ success: true, message: '没有可删除的对象' });
       }
@@ -149,7 +156,7 @@ export async function POST(request: Request) {
       for (let i = 0; i < objectKeys.length; i += chunkSize) {
         const chunk = objectKeys.slice(i, i + chunkSize);
         await s3Client.send(new DeleteObjectsCommand({
-          Bucket: BUCKET_NAME,
+          Bucket: bucketName,
           Delete: {
             Objects: chunk.map(key => ({ Key: key })),
             Quiet: true,
@@ -164,7 +171,7 @@ export async function POST(request: Request) {
     // ────────────────────────────────
     if (action === 'copy' || action === 'move') {
       const targetDest = toFolderPath(dest || '');
-      const copyTasks = await resolveCopyTasks(uniquePaths, targetDest);
+      const copyTasks = await resolveCopyTasks(s3Client, bucketName, uniquePaths, targetDest);
 
       if (copyTasks.length === 0) {
         return NextResponse.json({ success: true, message: '没有可处理的对象' });
@@ -175,8 +182,8 @@ export async function POST(request: Request) {
       // Copy all objects to destination
       await runChunked(effectiveTasks, 10, async (task) => {
         await s3Client.send(new CopyObjectCommand({
-          Bucket: BUCKET_NAME,
-          CopySource: `${BUCKET_NAME}/${task.srcKey}`,
+          Bucket: bucketName,
+          CopySource: `${bucketName}/${task.srcKey}`,
           Key: task.destKey,
         }));
       });
@@ -188,7 +195,7 @@ export async function POST(request: Request) {
         for (let i = 0; i < deleteSourceKeys.length; i += chunkSize) {
           const chunk = deleteSourceKeys.slice(i, i + chunkSize);
           await s3Client.send(new DeleteObjectsCommand({
-            Bucket: BUCKET_NAME,
+            Bucket: bucketName,
             Delete: {
               Objects: chunk.map(key => ({ Key: key })),
               Quiet: true,

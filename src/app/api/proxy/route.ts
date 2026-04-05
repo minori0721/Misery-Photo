@@ -1,12 +1,12 @@
 import { NextResponse } from 'next/server';
 import sharp from 'sharp';
 import { requireApiAuth } from '@/lib/auth';
+import { getBucketRuntimeFromRequest, noBucketConfiguredResponse } from '@/lib/bucket-config';
 
 const PROXY_TIMEOUT_MS = 15000;
 
-function getAllowedProxyHosts(): Set<string> {
+function getAllowedProxyHosts(endpoint?: string): Set<string> {
   const hosts = new Set<string>();
-  const endpoint = process.env.S3_ENDPOINT;
   if (endpoint) {
     try {
       hosts.add(new URL(endpoint).hostname.toLowerCase());
@@ -31,6 +31,9 @@ export async function GET(request: Request) {
     const unauthorized = await requireApiAuth(request);
     if (unauthorized) return unauthorized;
 
+    const runtime = getBucketRuntimeFromRequest(request);
+    if (!runtime) return noBucketConfiguredResponse();
+
     const { searchParams } = new URL(request.url);
     const url = searchParams.get('url');
     // thumb 标志位：开启缩略图模式
@@ -51,7 +54,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ success: false, message: '仅允许 https 协议' }, { status: 400 });
     }
 
-    const allowedHosts = getAllowedProxyHosts();
+    const allowedHosts = getAllowedProxyHosts(runtime.endpoint);
     if (allowedHosts.size === 0 || !allowedHosts.has(parsedUrl.hostname.toLowerCase())) {
       return NextResponse.json({ success: false, message: '目标域名不在白名单中' }, { status: 403 });
     }

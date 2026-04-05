@@ -1,5 +1,6 @@
+import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Settings2, Sparkles, Palette, LayoutGrid } from 'lucide-react';
+import { X, Settings2, Sparkles, Palette, LayoutGrid, Database, Check, Trash2, PlugZap } from 'lucide-react';
 import { ISettings } from '@/lib/useSettings';
 
 interface Props {
@@ -7,9 +8,152 @@ interface Props {
   onClose: () => void;
   settings: ISettings;
   updateSettings: (updates: Partial<ISettings>) => void;
+  onBucketsChanged?: () => void;
 }
 
-export default function SettingsModal({ isOpen, onClose, settings, updateSettings }: Props) {
+type BucketView = {
+  id: string;
+  name: string;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  forcePathStyle: boolean;
+  active: boolean;
+};
+
+type BucketForm = {
+  id?: string;
+  name: string;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  forcePathStyle: boolean;
+};
+
+const EMPTY_BUCKET_FORM: BucketForm = {
+  name: '',
+  endpoint: '',
+  region: 'auto',
+  bucket: '',
+  accessKeyId: '',
+  secretAccessKey: '',
+  forcePathStyle: true,
+};
+
+export default function SettingsModal({ isOpen, onClose, settings, updateSettings, onBucketsChanged }: Props) {
+  const [buckets, setBuckets] = useState<BucketView[]>([]);
+  const [loadingBuckets, setLoadingBuckets] = useState(false);
+  const [bucketMessage, setBucketMessage] = useState('');
+  const [bucketError, setBucketError] = useState('');
+  const [savingBucket, setSavingBucket] = useState(false);
+  const [testingBucket, setTestingBucket] = useState(false);
+  const [bucketForm, setBucketForm] = useState<BucketForm>(EMPTY_BUCKET_FORM);
+
+  const activeBucketName = useMemo(() => buckets.find((bucket) => bucket.active)?.name || '未设置', [buckets]);
+
+  const fetchBucketData = async () => {
+    setLoadingBuckets(true);
+    setBucketError('');
+    try {
+      const res = await fetch('/api/settings/buckets');
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || '获取存储桶配置失败');
+      }
+      setBuckets(data.data?.buckets || []);
+    } catch (error: any) {
+      setBucketError(error?.message || '读取存储桶失败');
+    } finally {
+      setLoadingBuckets(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    fetchBucketData();
+  }, [isOpen]);
+
+  const updateBucketForm = (key: keyof BucketForm, value: string | boolean) => {
+    setBucketForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleBucketAction = async (payload: any, successMessage?: string) => {
+    setSavingBucket(true);
+    setBucketError('');
+    setBucketMessage('');
+    try {
+      const res = await fetch('/api/settings/buckets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || '操作失败');
+      }
+
+      if (Array.isArray(data.data?.buckets)) {
+        setBuckets(data.data.buckets);
+      }
+      if (successMessage) {
+        setBucketMessage(successMessage);
+      }
+      onBucketsChanged?.();
+    } catch (error: any) {
+      setBucketError(error?.message || '操作失败');
+    } finally {
+      setSavingBucket(false);
+    }
+  };
+
+  const handleTestBucket = async () => {
+    setTestingBucket(true);
+    setBucketError('');
+    setBucketMessage('');
+    try {
+      const res = await fetch('/api/settings/buckets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'test',
+          bucket: bucketForm,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || '连接失败');
+      }
+      setBucketMessage(data.message || '连接成功');
+    } catch (error: any) {
+      setBucketError(error?.message || '连接失败');
+    } finally {
+      setTestingBucket(false);
+    }
+  };
+
+  const handleSaveBucket = async () => {
+    await handleBucketAction(
+      {
+        action: 'save',
+        bucket: bucketForm,
+        setActive: true,
+      },
+      '存储桶已保存并激活'
+    );
+    setBucketForm(EMPTY_BUCKET_FORM);
+  };
+
+  const handleSwitchBucket = async (id: string) => {
+    await handleBucketAction({ action: 'set-active', id }, '已切换当前存储桶');
+  };
+
+  const handleDeleteBucket = async (id: string) => {
+    if (!confirm('确认删除这个存储桶配置吗？')) return;
+    await handleBucketAction({ action: 'remove', id }, '存储桶配置已删除');
+  };
+
   return (
     <AnimatePresence>
       {isOpen && (
@@ -46,7 +190,7 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
             </div>
 
             {/* Content */}
-            <div className="p-6 space-y-8">
+            <div className="p-6 space-y-8 max-h-[78vh] overflow-y-auto">
               
               {/* Theme Selection */}
               <div className="space-y-3">
@@ -137,6 +281,149 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
                   >
                     2 列展示
                   </button>
+                </div>
+              </div>
+
+              {/* Bucket Manager */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <Database size={14} className={settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-blue-400'} />
+                    <h3 className="text-xs font-bold uppercase tracking-wider opacity-60">存储桶管理</h3>
+                  </div>
+                  <span className={`text-[10px] px-2 py-1 rounded-full ${settings.theme === 'miku' ? 'bg-slate-100 text-slate-500' : 'bg-white/10 text-white/60'}`}>
+                    当前: {activeBucketName}
+                  </span>
+                </div>
+
+                {loadingBuckets ? (
+                  <div className={`text-xs p-3 rounded-xl ${settings.theme === 'miku' ? 'bg-slate-50 text-slate-500' : 'bg-white/5 text-white/60'}`}>
+                    正在加载存储桶配置...
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {buckets.length === 0 && (
+                      <div className={`text-xs p-3 rounded-xl border ${settings.theme === 'miku' ? 'bg-yellow-50 border-yellow-200 text-yellow-700' : 'bg-yellow-500/10 border-yellow-500/30 text-yellow-300'}`}>
+                        当前没有可用存储桶，请在下方新增并激活。
+                      </div>
+                    )}
+
+                    {buckets.map((bucket) => (
+                      <div
+                        key={bucket.id}
+                        className={`p-3 rounded-xl border ${bucket.active
+                          ? (settings.theme === 'miku' ? 'bg-[#39C5BB]/8 border-[#39C5BB]/40' : 'bg-purple-500/10 border-purple-500/40')
+                          : (settings.theme === 'miku' ? 'bg-slate-50 border-slate-200' : 'bg-white/5 border-white/10')
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-sm font-bold truncate">{bucket.name}</p>
+                            <p className="text-[11px] opacity-60 truncate">{bucket.bucket} @ {bucket.endpoint}</p>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {!bucket.active && (
+                              <button
+                                onClick={() => handleSwitchBucket(bucket.id)}
+                                disabled={savingBucket}
+                                className={`px-2 py-1 rounded-md text-[10px] font-bold ${settings.theme === 'miku' ? 'bg-white border border-slate-200 text-slate-600' : 'bg-white/10 text-white/80'}`}
+                              >
+                                设为当前
+                              </button>
+                            )}
+                            {bucket.active && (
+                              <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-bold ${settings.theme === 'miku' ? 'bg-white text-[#39C5BB]' : 'bg-purple-500/20 text-purple-300'}`}>
+                                <Check size={10} /> 当前
+                              </span>
+                            )}
+                            <button
+                              onClick={() => handleDeleteBucket(bucket.id)}
+                              disabled={savingBucket}
+                              className={`p-1.5 rounded-md ${settings.theme === 'miku' ? 'text-red-500 hover:bg-red-50' : 'text-red-300 hover:bg-red-500/10'}`}
+                              title="删除"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className={`p-3 rounded-xl border space-y-3 ${settings.theme === 'miku' ? 'bg-slate-50 border-slate-200' : 'bg-white/5 border-white/10'}`}>
+                  <p className="text-xs font-bold uppercase tracking-wider opacity-70">新增 / 更新存储桶</p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      value={bucketForm.name}
+                      onChange={(e) => updateBucketForm('name', e.target.value)}
+                      placeholder="显示名称"
+                      className={`px-3 py-2 rounded-lg text-xs border ${settings.theme === 'miku' ? 'bg-white border-slate-200' : 'bg-black/30 border-white/10'}`}
+                    />
+                    <input
+                      value={bucketForm.bucket}
+                      onChange={(e) => updateBucketForm('bucket', e.target.value)}
+                      placeholder="Bucket 名"
+                      className={`px-3 py-2 rounded-lg text-xs border ${settings.theme === 'miku' ? 'bg-white border-slate-200' : 'bg-black/30 border-white/10'}`}
+                    />
+                    <input
+                      value={bucketForm.endpoint}
+                      onChange={(e) => updateBucketForm('endpoint', e.target.value)}
+                      placeholder="Endpoint (https://...)"
+                      className={`px-3 py-2 rounded-lg text-xs border col-span-2 ${settings.theme === 'miku' ? 'bg-white border-slate-200' : 'bg-black/30 border-white/10'}`}
+                    />
+                    <input
+                      value={bucketForm.region}
+                      onChange={(e) => updateBucketForm('region', e.target.value)}
+                      placeholder="Region (默认 auto)"
+                      className={`px-3 py-2 rounded-lg text-xs border ${settings.theme === 'miku' ? 'bg-white border-slate-200' : 'bg-black/30 border-white/10'}`}
+                    />
+                    <label className="flex items-center gap-2 text-xs opacity-80">
+                      <input
+                        type="checkbox"
+                        checked={bucketForm.forcePathStyle}
+                        onChange={(e) => updateBucketForm('forcePathStyle', e.target.checked)}
+                      />
+                      强制 path-style
+                    </label>
+                    <input
+                      value={bucketForm.accessKeyId}
+                      onChange={(e) => updateBucketForm('accessKeyId', e.target.value)}
+                      placeholder="Access Key"
+                      className={`px-3 py-2 rounded-lg text-xs border col-span-2 ${settings.theme === 'miku' ? 'bg-white border-slate-200' : 'bg-black/30 border-white/10'}`}
+                    />
+                    <input
+                      type="password"
+                      value={bucketForm.secretAccessKey}
+                      onChange={(e) => updateBucketForm('secretAccessKey', e.target.value)}
+                      placeholder="Secret Key"
+                      className={`px-3 py-2 rounded-lg text-xs border col-span-2 ${settings.theme === 'miku' ? 'bg-white border-slate-200' : 'bg-black/30 border-white/10'}`}
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleTestBucket}
+                      disabled={testingBucket || savingBucket}
+                      className={`px-3 py-2 rounded-lg text-xs font-bold inline-flex items-center gap-1 ${settings.theme === 'miku' ? 'bg-white border border-slate-200 text-slate-700' : 'bg-white/10 text-white'}`}
+                    >
+                      <PlugZap size={12} /> {testingBucket ? '测试中...' : '测试连接'}
+                    </button>
+                    <button
+                      onClick={handleSaveBucket}
+                      disabled={savingBucket}
+                      className={`px-3 py-2 rounded-lg text-xs font-bold ${settings.theme === 'miku' ? 'bg-[#39C5BB] text-white' : 'bg-purple-600 text-white'}`}
+                    >
+                      {savingBucket ? '保存中...' : '保存并激活'}
+                    </button>
+                  </div>
+
+                  {bucketMessage && (
+                    <p className={`text-xs ${settings.theme === 'miku' ? 'text-emerald-600' : 'text-emerald-300'}`}>{bucketMessage}</p>
+                  )}
+                  {bucketError && (
+                    <p className={`text-xs ${settings.theme === 'miku' ? 'text-red-600' : 'text-red-300'}`}>{bucketError}</p>
+                  )}
                 </div>
               </div>
 

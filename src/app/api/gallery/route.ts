@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
 import { ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { s3Client, BUCKET_NAME } from '@/lib/s3';
 import { requireApiAuth } from '@/lib/auth';
 import { isValidStoragePath, uniqStrings } from '@/lib/validation';
+import { getBucketRuntimeFromRequest, noBucketConfiguredResponse } from '@/lib/bucket-config';
 
 const naturalSort = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 
@@ -11,6 +11,12 @@ export async function GET(request: Request) {
   try {
     const unauthorized = await requireApiAuth(request);
     if (unauthorized) return unauthorized;
+
+    const runtime = getBucketRuntimeFromRequest(request);
+    if (!runtime) return noBucketConfiguredResponse();
+
+    const s3Client = runtime.client;
+    const bucketName = runtime.bucketName;
 
     const { searchParams } = new URL(request.url);
     const path = searchParams.get('path') || '';
@@ -30,7 +36,7 @@ export async function GET(request: Request) {
 
     if (jsonMode) {
       const command = new ListObjectsV2Command({
-        Bucket: BUCKET_NAME,
+        Bucket: bucketName,
         Prefix: path,
         Delimiter: '/',
       });
@@ -75,7 +81,7 @@ export async function GET(request: Request) {
             const signedUrl = await getSignedUrl(
               s3Client,
               new GetObjectCommand({
-                Bucket: BUCKET_NAME,
+                Bucket: bucketName,
                 Key: key,
               }),
               { expiresIn: 3600 }
@@ -108,7 +114,7 @@ export async function GET(request: Request) {
 
     // Signer mode: only sign ListObjectsV2 URL, bytes and XML parsing happen in browser.
     const listCommand = new ListObjectsV2Command({
-      Bucket: BUCKET_NAME,
+      Bucket: bucketName,
       Prefix: path,
       Delimiter: '/',
       ContinuationToken: continuationToken,
@@ -139,6 +145,12 @@ export async function POST(request: Request) {
     const unauthorized = await requireApiAuth(request);
     if (unauthorized) return unauthorized;
 
+    const runtime = getBucketRuntimeFromRequest(request);
+    if (!runtime) return noBucketConfiguredResponse();
+
+    const s3Client = runtime.client;
+    const bucketName = runtime.bucketName;
+
     const { action, keys } = await request.json() as {
       action: 'sign-get-objects';
       keys: string[];
@@ -167,7 +179,7 @@ export async function POST(request: Request) {
         const url = await getSignedUrl(
           s3Client,
           new GetObjectCommand({
-            Bucket: BUCKET_NAME,
+            Bucket: bucketName,
             Key: key,
           }),
           { expiresIn: 3600 }

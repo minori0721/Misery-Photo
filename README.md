@@ -39,16 +39,16 @@ npm run build
 npm run start 
 ```
 
-## 🔐 必须填写的环境变量 (Environment Variables)
+## 🔐 环境变量与运行时存储桶配置
 
-务必注入以下配置方可生效（详见 `.env.example`）：
+务必注入管理员与会话密钥配置。S3 配置既可使用环境变量，也可在登录后通过设置中心新增多个存储桶并切换：
 
 ```env
-S3_ENDPOINT="https://xxxx.r2.cloudflarestorage.com"
-S3_REGION="auto"
-S3_BUCKET="你的存储桶名"
-S3_ACCESS_KEY="云存公钥"
-S3_SECRET_KEY="云存密匙"
+S3_ENDPOINT="可选：S3 后备 endpoint"
+S3_REGION="可选：默认 auto"
+S3_BUCKET="可选：后备桶名"
+S3_ACCESS_KEY="可选：后备 access key"
+S3_SECRET_KEY="可选：后备 secret key"
 
 ADMIN_USER="管理员用户名"
 ADMIN_PASS="管理员密码"
@@ -59,3 +59,4 @@ PROXY_ALLOWED_HOSTS="可选，逗号分隔的代理白名单域名"
 说明：
 1. 当 AUTH_SECRET 缺失或过短时，服务端会拒绝鉴权相关接口请求，避免带病运行。
 2. PROXY_ALLOWED_HOSTS 未设置时，代理仅放行 S3_ENDPOINT 对应域名。
+3. 若既没有环境变量 S3 配置，也没有在设置中心激活任何存储桶，首页会显示“无可用存储桶”并引导配置。

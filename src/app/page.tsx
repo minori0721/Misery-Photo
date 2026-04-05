@@ -124,6 +124,8 @@ function GalleryContent() {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [noBucketConfigured, setNoBucketConfigured] = useState(false);
+  const [bucketRefreshTick, setBucketRefreshTick] = useState(0);
   const [activeAbortController, setActiveAbortController] = useState<AbortController | null>(null);
 
   const toastIdRef = useRef(0);
@@ -164,7 +166,9 @@ function GalleryContent() {
     }
 
     if (!res.ok) {
-      throw new Error(payload?.message || `请求失败（${res.status}）`);
+      const err = new Error(payload?.message || `请求失败（${res.status}）`) as Error & { code?: string };
+      err.code = payload?.code;
+      throw err;
     }
 
     return payload as T;
@@ -209,6 +213,7 @@ function GalleryContent() {
 
     setLoading(true);
     setError('');
+    setNoBucketConfigured(false);
     try {
       const foldersMap = new Map<string, GalleryFolder>();
       const filesMetaMap = new Map<string, { key: string; size: number; lastModified: string }>();
@@ -275,6 +280,15 @@ function GalleryContent() {
       if ((err as { name?: string })?.name === 'AbortError') {
         return;
       }
+      const errCode = (err as { code?: string })?.code;
+      if (errCode === 'NO_BUCKET_CONFIG') {
+        if (reqId === galleryReqIdRef.current) {
+          setNoBucketConfigured(true);
+          setData({ folders: [], files: [], currentPath: path });
+          setError('');
+        }
+        return;
+      }
       const msg = err instanceof Error ? err.message : '获取数据失败';
       if (reqId === galleryReqIdRef.current) {
         setError(msg);
@@ -334,7 +348,7 @@ function GalleryContent() {
   useEffect(() => {
     fetchGallery(currentPath);
     setViewMode(currentPath ? 'manga' : 'grid');
-  }, [currentPath]);
+  }, [currentPath, bucketRefreshTick]);
 
   useEffect(() => {
     return () => {
@@ -673,6 +687,7 @@ function GalleryContent() {
         onClose={() => setIsSettingsOpen(false)}
         settings={settings}
         updateSettings={updateSettings}
+        onBucketsChanged={() => setBucketRefreshTick((v) => v + 1)}
       />
 
       <UploadModal
@@ -846,6 +861,22 @@ function GalleryContent() {
           <div className="flex flex-col items-center justify-center py-40">
             <Loader2 className={`w-10 h-10 animate-spin mb-4 ${settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-purple-600'}`} />
             <p className={`text-xs font-black uppercase tracking-[4px] ${settings.theme === 'miku' ? 'text-slate-400' : 'text-white/20'}`}>正在同步云端数据...</p>
+          </div>
+        ) : noBucketConfigured ? (
+          <div className={`max-w-2xl mx-auto mt-14 p-8 rounded-3xl border text-center ${settings.theme === 'miku' ? 'bg-white border-[#39C5BB]/20' : 'bg-white/5 border-white/10'}`}>
+            <div className={`w-16 h-16 mx-auto rounded-2xl flex items-center justify-center mb-5 ${settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-purple-500/10 text-purple-400'}`}>
+              <HardDrive size={28} />
+            </div>
+            <h2 className="text-xl font-black tracking-wider mb-2">暂无可用存储桶</h2>
+            <p className={`text-sm mb-6 ${settings.theme === 'miku' ? 'text-slate-500' : 'text-white/60'}`}>
+              登录成功，但当前没有可用桶配置。请前往设置添加并激活一个存储桶。
+            </p>
+            <button
+              onClick={() => setIsSettingsOpen(true)}
+              className={`px-6 py-3 rounded-xl text-sm font-black uppercase tracking-widest ${settings.theme === 'miku' ? 'bg-[#39C5BB] text-white' : 'bg-purple-600 text-white'}`}
+            >
+              打开设置
+            </button>
           </div>
         ) : (
           <motion.div
