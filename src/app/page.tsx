@@ -30,7 +30,6 @@ import UploadModal from '@/components/UploadModal';
 import SettingsModal from '@/components/SettingsModal';
 import TargetPickerModal from '@/components/TargetPickerModal';
 import JSZip from 'jszip';
-import { BUCKET_NAME } from '@/lib/s3';
 import { useSettings, ISettings } from '@/lib/useSettings';
 
 // Toast 消息类型
@@ -38,6 +37,64 @@ type Toast = { id: number; message: string; type: 'info' | 'success' | 'error' }
 
 // 视图模式：网格 或 漫画模式（纵向平铺）
 type ViewMode = 'grid' | 'manga';
+
+type GalleryFolder = { name: string; path: string; type: 'folder'; previews: string[] };
+type GalleryFile = {
+  name: string;
+  path: string;
+  url: string;
+  size: number;
+  lastModified: string;
+  type: 'image';
+};
+type GalleryData = { folders: GalleryFolder[]; files: GalleryFile[]; currentPath: string };
+
+const IMAGE_EXT_RE = /\.(jpg|jpeg|png|webp|gif)$/i;
+const naturalSort = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+
+const textContent = (el: Element, tagName: string) => el.getElementsByTagName(tagName)[0]?.textContent || '';
+
+function parseS3ListXml(xmlString: string, path: string) {
+  const parser = new DOMParser();
+  const xml = parser.parseFromString(xmlString, 'application/xml');
+  const parseError = xml.getElementsByTagName('parsererror')[0];
+  if (parseError) {
+    throw new Error('解析 S3 XML 失败');
+  }
+
+  const prefixes = Array.from(xml.getElementsByTagName('CommonPrefixes'));
+  const folders: GalleryFolder[] = prefixes
+    .map((cp) => {
+      const folderPath = textContent(cp, 'Prefix');
+      const folderName = folderPath.replace(path, '').replace(/\/$/, '');
+      if (!folderPath || !folderName) return null;
+      return {
+        name: folderName,
+        path: folderPath,
+        type: 'folder' as const,
+        previews: [],
+      };
+    })
+    .filter((f): f is GalleryFolder => Boolean(f));
+
+  const contents = Array.from(xml.getElementsByTagName('Contents'));
+  const filesMeta = contents
+    .map((item) => {
+      const key = textContent(item, 'Key');
+      if (!key || key === path || !IMAGE_EXT_RE.test(key)) return null;
+      return {
+        key,
+        size: Number(textContent(item, 'Size') || '0'),
+        lastModified: textContent(item, 'LastModified') || '',
+      };
+    })
+    .filter((f): f is { key: string; size: number; lastModified: string } => Boolean(f));
+
+  const isTruncated = textContent(xml.documentElement, 'IsTruncated') === 'true';
+  const nextContinuationToken = textContent(xml.documentElement, 'NextContinuationToken') || null;
+
+  return { folders, filesMeta, isTruncated, nextContinuationToken };
+}
 
 // Framer Motion 动画变体：用于交错入场
 const containerVariants = {
@@ -58,7 +115,7 @@ function GalleryContent() {
   const searchParams = useSearchParams();
   const currentPath = searchParams.get('path') || '';
 
-  const [data, setData] = useState<any>({ folders: [], files: [] });
+  const [data, setData] = useState<GalleryData>({ folders: [], files: [], currentPath: '' });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -97,6 +154,111 @@ function GalleryContent() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
+  const scrollToTop = () => window.scrollTo({ top: 0, behavior: 'smooth' });
+
+  // 获取文件列表（Signer Mode）：后端仅签名，前端直连 S3 拉 XML 并解析
+  const fetchGallery = async (path: string) => {
+    setLoading(true);
+    setError('');
+    try {
+      const foldersMap = new Map<string, GalleryFolder>();
+      const filesMetaMap = new Map<string, { key: string; size: number; lastModified: string }>();
+      let continuationToken: string | null = null;
+
+      do {
+        const tokenPart = continuationToken ? `&continuationToken=${encodeURIComponent(continuationToken)}` : '';
+        const signerRes = await fetch(`/api/gallery?path=${encodeURIComponent(path)}${tokenPart}`);
+        const signerJson = await signerRes.json();
+        if (!signerJson.success) {
+          throw new Error(signerJson.message || '获取列表签名失败');
+        }
+
+        const listRes = await fetch(signerJson.data.listUrl);
+        if (!listRes.ok) {
+          throw new Error(`S3 列表请求失败: ${listRes.status}`);
+        }
+
+        const xmlText = await listRes.text();
+        const parsed = parseS3ListXml(xmlText, path);
+
+        parsed.folders.forEach((folder) => foldersMap.set(folder.path, folder));
+        parsed.filesMeta.forEach((fileMeta) => filesMetaMap.set(fileMeta.key, fileMeta));
+        continuationToken = parsed.isTruncated ? parsed.nextContinuationToken : null;
+      } while (continuationToken);
+
+      const sortedFileKeys = Array.from(filesMetaMap.keys()).sort((a, b) => naturalSort(a, b));
+
+      const signedUrlMap: Record<string, string> = {};
+      for (let i = 0; i < sortedFileKeys.length; i += 200) {
+        const chunkKeys = sortedFileKeys.slice(i, i + 200);
+        const signRes = await fetch('/api/gallery', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
+        });
+        const signJson = await signRes.json();
+        if (!signJson.success) {
+          throw new Error(signJson.message || '文件签名失败');
+        }
+        Object.assign(signedUrlMap, signJson.data || {});
+      }
+
+      const files: GalleryFile[] = sortedFileKeys
+        .map((key) => {
+          const meta = filesMetaMap.get(key);
+          const url = signedUrlMap[key];
+          if (!meta || !url) return null;
+          return {
+            name: key.replace(path, '') || key,
+            path: key,
+            url,
+            size: meta.size,
+            lastModified: meta.lastModified,
+            type: 'image' as const,
+          };
+        })
+        .filter((f): f is GalleryFile => Boolean(f));
+
+      const folders = Array.from(foldersMap.values()).sort((a, b) => naturalSort(a.name, b.name));
+      setData({ folders, files, currentPath: path });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '获取数据失败';
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 文件夹缩略图也走直连：前端自己拿签名列表 + 解析 + 批量签图
+  const fetchFolderPreviewDirect = useCallback(async (path: string): Promise<string[]> => {
+    const signerRes = await fetch(`/api/gallery?path=${encodeURIComponent(path)}&maxKeys=12`);
+    const signerJson = await signerRes.json();
+    if (!signerJson.success) return [];
+
+    const listRes = await fetch(signerJson.data.listUrl);
+    if (!listRes.ok) return [];
+
+    const xmlText = await listRes.text();
+    const parsed = parseS3ListXml(xmlText, path);
+    const previewKeys = parsed.filesMeta.map((m) => m.key).slice(0, 3);
+    if (previewKeys.length === 0) return [];
+
+    const signRes = await fetch('/api/gallery', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'sign-get-objects', keys: previewKeys }),
+    });
+    const signJson = await signRes.json();
+    if (!signJson.success) return [];
+
+    return previewKeys.map((k) => signJson.data?.[k]).filter((u): u is string => Boolean(u));
+  }, []);
+
+  useEffect(() => {
+    fetchGallery(currentPath);
+    setViewMode(currentPath ? 'manga' : 'grid');
+  }, [currentPath]);
+
   // 页面卸载或路径切换时，自动取消正在进行的下载请求
   useEffect(() => {
     return () => {
@@ -105,32 +267,6 @@ function GalleryContent() {
       }
     };
   }, [activeAbortController]);
-
-  const scrollToTop = () => window.scrollTo({ top: 0, behavior: 'smooth' });
-
-  // 获取文件列表
-  const fetchGallery = async (path: string) => {
-    setLoading(true);
-    setError('');
-    try {
-      const res = await fetch(`/api/gallery?path=${encodeURIComponent(path)}`);
-      const json = await res.json();
-      if (json.success) {
-        setData(json.data);
-      } else {
-        setError(json.message);
-      }
-    } catch (err: any) {
-      setError(err.message || '获取数据失败');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchGallery(currentPath);
-    setViewMode(currentPath ? 'manga' : 'grid');
-  }, [currentPath]);
 
   // 处理文件夹点击
   const handleFolderClick = (folderPath: string) => {
@@ -207,7 +343,7 @@ function GalleryContent() {
       } else if (hasSubFolders) {
         // 保留子目录结构
         const subFetchTasks = data.folders.map(async (folder: any) => {
-          const res = await fetch(`/api/gallery?path=${encodeURIComponent(folder.path)}`, { signal });
+          const res = await fetch(`/api/gallery?path=${encodeURIComponent(folder.path)}&json=1`, { signal });
           const json = await res.json();
           if (json.success) {
             return (json.data.files as any[]).map((f: any) => ({
@@ -602,6 +738,7 @@ function GalleryContent() {
                   settings={settings}
                   selectionMode={selectionMode}
                   isSelected={selectedItems.has(folder.path)}
+                  fetchPreviewUrls={fetchFolderPreviewDirect}
                 />
               ))}
 
@@ -637,7 +774,7 @@ function GalleryContent() {
                     <div className={`absolute inset-0 animate-pulse ${settings.theme === 'miku' ? 'bg-slate-100' : 'bg-white/5'}`} />
 
                     <img
-                      src={`/api/proxy?url=${encodeURIComponent(file.url)}&thumbnail=${viewMode === 'grid'}`}
+                      src={file.url}
                       alt={file.name}
                       loading="lazy"
                       className={viewMode === 'grid'
@@ -772,9 +909,10 @@ export default function GalleryPage() {
 }
 
 // 文件夹卡片组件：v0.5.0 重构支持异步封面加载
-function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSelected }: {
+function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSelected, fetchPreviewUrls }: {
   folder: any; onClick: () => void; onDelete: () => void; settings: ISettings;
   selectionMode?: boolean; isSelected?: boolean;
+  fetchPreviewUrls: (path: string) => Promise<string[]>;
 }) {
   const [currentIdx, setCurrentIdx] = useState(0);
   const [isHovered, setIsHovered] = useState(false);
@@ -787,10 +925,9 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
     const fetchPreviews = async () => {
       setFetching(true);
       try {
-        const res = await fetch(`/api/gallery/folder-preview?path=${encodeURIComponent(folder.path)}`);
-        const json = await res.json();
-        if (isMounted && json.success) {
-          setPreviews(json.previews);
+        const urls = await fetchPreviewUrls(folder.path);
+        if (isMounted) {
+          setPreviews(urls);
         }
       } catch (err) {
         console.error("Fetch previews failed:", err);
@@ -801,7 +938,7 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
 
     fetchPreviews();
     return () => { isMounted = false; };
-  }, [folder.path]);
+  }, [folder.path, fetchPreviewUrls]);
 
   useEffect(() => {
     let timer: NodeJS.Timeout;
@@ -847,9 +984,7 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
           ) : (
             <motion.img
               key={previews[currentIdx] || 'empty'}
-              src={previews[currentIdx]
-                ? `/api/proxy?url=${encodeURIComponent(previews[currentIdx])}&thumbnail=true`
-                : '/folder-placeholder.png'}
+              src={previews[currentIdx] || '/folder-placeholder.png'}
               initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               transition={{ duration: 0.8 }}
               className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-[3s]"
