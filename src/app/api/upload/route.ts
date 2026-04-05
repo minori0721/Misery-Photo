@@ -2,13 +2,33 @@ import { NextResponse } from 'next/server';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { s3Client, BUCKET_NAME } from '@/lib/s3';
+import { requireApiAuth } from '@/lib/auth';
+import { isValidStoragePath, toFolderPath } from '@/lib/validation';
 
 export async function POST(request: Request) {
   try {
+    const unauthorized = await requireApiAuth(request);
+    if (unauthorized) return unauthorized;
+
     const { filename, path, contentType } = await request.json();
+    if (typeof filename !== 'string' || filename.length === 0 || filename.length > 255) {
+      return NextResponse.json({ success: false, message: 'filename 不合法' }, { status: 400 });
+    }
+
+    if (!isValidStoragePath(filename, { allowEmpty: false, maxLength: 255 })) {
+      return NextResponse.json({ success: false, message: 'filename 不合法' }, { status: 400 });
+    }
+
+    if (!isValidStoragePath(path, { allowEmpty: true, maxLength: 1024 })) {
+      return NextResponse.json({ success: false, message: 'path 不合法' }, { status: 400 });
+    }
+
+    if (typeof contentType !== 'undefined' && (typeof contentType !== 'string' || contentType.length > 255)) {
+      return NextResponse.json({ success: false, message: 'contentType 不合法' }, { status: 400 });
+    }
     
     // 构造完整 Key
-    const key = `${path}${filename}`;
+    const key = `${toFolderPath(path)}${filename}`;
 
     const command = new PutObjectCommand({
       Bucket: BUCKET_NAME,

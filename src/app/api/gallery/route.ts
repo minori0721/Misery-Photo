@@ -2,11 +2,16 @@ import { NextResponse } from 'next/server';
 import { ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { s3Client, BUCKET_NAME } from '@/lib/s3';
+import { requireApiAuth } from '@/lib/auth';
+import { isValidStoragePath, uniqStrings } from '@/lib/validation';
 
 const naturalSort = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 
 export async function GET(request: Request) {
   try {
+    const unauthorized = await requireApiAuth(request);
+    if (unauthorized) return unauthorized;
+
     const { searchParams } = new URL(request.url);
     const path = searchParams.get('path') || '';
     const jsonMode = searchParams.get('json') === '1';
@@ -14,6 +19,14 @@ export async function GET(request: Request) {
     const continuationToken = searchParams.get('continuationToken') || undefined;
     const maxKeysParam = Number(searchParams.get('maxKeys') || 1000);
     const maxKeys = Number.isNaN(maxKeysParam) ? 1000 : Math.min(Math.max(maxKeysParam, 1), 1000);
+
+    if (!isValidStoragePath(path, { allowEmpty: true, maxLength: 1024 })) {
+      return NextResponse.json({ success: false, message: 'path 参数不合法' }, { status: 400 });
+    }
+
+    if (continuationToken && continuationToken.length > 2048) {
+      return NextResponse.json({ success: false, message: 'continuationToken 过长' }, { status: 400 });
+    }
 
     if (jsonMode) {
       const command = new ListObjectsV2Command({
@@ -123,6 +136,9 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const unauthorized = await requireApiAuth(request);
+    if (unauthorized) return unauthorized;
+
     const { action, keys } = await request.json() as {
       action: 'sign-get-objects';
       keys: string[];
@@ -136,7 +152,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, message: '缺少 keys' }, { status: 400 });
     }
 
-    const uniqKeys = Array.from(new Set(keys)).slice(0, 2000);
+    if (keys.length > 2000) {
+      return NextResponse.json({ success: false, message: 'keys 数量超过上限 2000' }, { status: 400 });
+    }
+
+    const uniqKeys = uniqStrings(keys.map((k) => String(k))).slice(0, 2000);
+    const invalidKey = uniqKeys.find((k) => !isValidStoragePath(k, { allowEmpty: false, maxLength: 1024 }));
+    if (invalidKey) {
+      return NextResponse.json({ success: false, message: '存在非法 key 路径' }, { status: 400 });
+    }
+
     const signedEntries = await Promise.all(
       uniqKeys.map(async (key) => {
         const url = await getSignedUrl(

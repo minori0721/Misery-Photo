@@ -1,10 +1,23 @@
 import { NextResponse } from 'next/server';
 import { DeleteObjectCommand, DeleteObjectsCommand, ListObjectsV2Command, ListObjectsV2CommandOutput } from '@aws-sdk/client-s3';
 import { s3Client, BUCKET_NAME } from '@/lib/s3';
+import { requireApiAuth } from '@/lib/auth';
+import { isValidStoragePath, toFolderPath } from '@/lib/validation';
 
 export async function POST(request: Request) {
   try {
+    const unauthorized = await requireApiAuth(request);
+    if (unauthorized) return unauthorized;
+
     const { path, type } = await request.json(); // type: 'image' | 'folder'
+
+    if (type !== 'image' && type !== 'folder') {
+      return NextResponse.json({ success: false, message: 'type 不合法' }, { status: 400 });
+    }
+
+    if (!isValidStoragePath(path, { allowEmpty: false, maxLength: 1024 })) {
+      return NextResponse.json({ success: false, message: 'path 不合法' }, { status: 400 });
+    }
 
     if (type === 'image') {
       // 删除单图
@@ -14,12 +27,13 @@ export async function POST(request: Request) {
       });
       await s3Client.send(command);
     } else if (type === 'folder') {
+      const folderPath = toFolderPath(path);
       // 递归删除文件夹 (S3 需要先列出所有对象)
       let continuationToken: string | undefined = undefined;
       do {
         const listCommand = new ListObjectsV2Command({
           Bucket: BUCKET_NAME,
-          Prefix: path,
+          Prefix: folderPath,
           ContinuationToken: continuationToken,
         });
 

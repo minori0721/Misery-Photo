@@ -147,6 +147,29 @@ function GalleryContent() {
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
   }, []);
 
+  const handleAuthExpired = useCallback((message?: string) => {
+    addToast(message || '登录已过期，请重新登录', 'error');
+    router.push('/login');
+  }, [addToast, router]);
+
+  const fetchApiJson = useCallback(async <T = any>(input: RequestInfo | URL, init?: RequestInit): Promise<T> => {
+    const res = await fetch(input, init);
+    const contentType = res.headers.get('content-type') || '';
+    const isJson = contentType.includes('application/json');
+    const payload = isJson ? await res.json() : null;
+
+    if (res.status === 401) {
+      handleAuthExpired(payload?.message);
+      throw new Error('UNAUTHORIZED');
+    }
+
+    if (!res.ok) {
+      throw new Error(payload?.message || `请求失败（${res.status}）`);
+    }
+
+    return payload as T;
+  }, [handleAuthExpired]);
+
   const { settings, updateSettings, mounted } = useSettings();
 
   // 监听滚动条以显示/隐藏回顶按钮
@@ -193,8 +216,7 @@ function GalleryContent() {
 
       do {
         const tokenPart = continuationToken ? `&continuationToken=${encodeURIComponent(continuationToken)}` : '';
-        const signerRes = await fetch(`/api/gallery?path=${encodeURIComponent(path)}${tokenPart}`, { signal });
-        const signerJson = await signerRes.json();
+        const signerJson = await fetchApiJson<any>(`/api/gallery?path=${encodeURIComponent(path)}${tokenPart}`, { signal });
         if (!signerJson.success) {
           throw new Error(signerJson.message || '获取列表签名失败');
         }
@@ -217,13 +239,12 @@ function GalleryContent() {
       const signedUrlMap: Record<string, string> = {};
       for (let i = 0; i < sortedFileKeys.length; i += 200) {
         const chunkKeys = sortedFileKeys.slice(i, i + 200);
-        const signRes = await fetch('/api/gallery', {
+        const signJson = await fetchApiJson<any>('/api/gallery', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
           signal,
         });
-        const signJson = await signRes.json();
         if (!signJson.success) {
           throw new Error(signJson.message || '文件签名失败');
         }
@@ -276,8 +297,7 @@ function GalleryContent() {
     const run = (async () => {
       await acquirePreviewSlot();
       try {
-        const signerRes = await fetch(`/api/gallery?path=${encodeURIComponent(path)}&maxKeys=12`);
-        const signerJson = await signerRes.json();
+        const signerJson = await fetchApiJson<any>(`/api/gallery?path=${encodeURIComponent(path)}&maxKeys=12`);
         if (!signerJson.success) return [];
 
         const listRes = await fetch(signerJson.data.listUrl);
@@ -291,12 +311,11 @@ function GalleryContent() {
           return [];
         }
 
-        const signRes = await fetch('/api/gallery', {
+        const signJson = await fetchApiJson<any>('/api/gallery', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'sign-get-objects', keys: previewKeys }),
         });
-        const signJson = await signRes.json();
         if (!signJson.success) return [];
 
         const urls = previewKeys.map((k) => signJson.data?.[k]).filter((u): u is string => Boolean(u));
@@ -390,8 +409,7 @@ function GalleryContent() {
 
       do {
         const tokenPart = continuationToken ? `&continuationToken=${encodeURIComponent(continuationToken)}` : '';
-        const signerRes = await fetch(`/api/gallery?path=${encodeURIComponent(walkPath)}${tokenPart}`, { signal });
-        const signerJson = await signerRes.json();
+        const signerJson = await fetchApiJson<any>(`/api/gallery?path=${encodeURIComponent(walkPath)}${tokenPart}`, { signal });
         if (!signerJson.success) {
           throw new Error(signerJson.message || '获取下载列表签名失败');
         }
@@ -415,13 +433,12 @@ function GalleryContent() {
     const signedUrlMap: Record<string, string> = {};
     for (let i = 0; i < uniqKeys.length; i += 200) {
       const chunkKeys = uniqKeys.slice(i, i + 200);
-      const signRes = await fetch('/api/gallery', {
+      const signJson = await fetchApiJson<any>('/api/gallery', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
         signal,
       });
-      const signJson = await signRes.json();
       if (!signJson.success) {
         throw new Error(signJson.message || '下载对象签名失败');
       }
@@ -543,7 +560,7 @@ function GalleryContent() {
     if (!confirm(`确认删除选中的 ${count} 个项目？此操作不可撤销。`)) return;
     try {
       const paths = Array.from(selectedItems);
-      await fetch('/api/gallery/batch', {
+      await fetchApiJson('/api/gallery/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'delete', paths }),
@@ -573,12 +590,11 @@ function GalleryContent() {
     setPendingAction(null);
     exitSelectionMode();
     try {
-      const res = await fetch('/api/gallery/batch', {
+      const json = await fetchApiJson<any>('/api/gallery/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, paths, dest: dest ? `${dest}` : '' }),
       });
-      const json = await res.json();
       if (json.success) {
         addToast(`✓ ${label}完成，已刷新画廊`, 'success');
         fetchGallery(currentPath);
@@ -590,9 +606,14 @@ function GalleryContent() {
     }
   };
 
-  const handleLogout = () => {
-    document.cookie = "nebula_session=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
-    router.push('/login');
+  const handleLogout = async () => {
+    try {
+      await fetchApiJson('/api/logout', { method: 'POST' });
+    } catch {
+      // Ignore logout response errors and still redirect to login.
+    } finally {
+      router.push('/login');
+    }
   };
 
   const handleDelete = async (path: string, type: 'image' | 'folder') => {
@@ -600,12 +621,11 @@ function GalleryContent() {
     if (!confirm(confirmMsg)) return;
 
     try {
-      const res = await fetch('/api/gallery/delete', {
+      const json = await fetchApiJson<any>('/api/gallery/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path, type }),
       });
-      const json = await res.json();
       if (json.success) {
         fetchGallery(currentPath);
       } else {

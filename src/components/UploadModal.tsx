@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   X, 
@@ -22,6 +23,7 @@ interface UploadModalProps {
 }
 
 export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }: UploadModalProps) {
+  const router = useRouter();
   const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -30,6 +32,20 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { settings } = useSettings();
 
+  const fetchApiJson = async <T = any>(input: RequestInfo | URL, init?: RequestInit): Promise<T> => {
+    const res = await fetch(input, init);
+    const contentType = res.headers.get('content-type') || '';
+    const payload = contentType.includes('application/json') ? await res.json() : null;
+    if (res.status === 401) {
+      router.push('/login');
+      throw new Error(payload?.message || '登录已过期，请重新登录');
+    }
+    if (!res.ok) {
+      throw new Error(payload?.message || `请求失败（${res.status}）`);
+    }
+    return payload as T;
+  };
+
   if (!isOpen) return null;
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -37,12 +53,12 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
   };
 
   const uploadToS3 = async (file: Blob | File, filename: string, path: string) => {
-    const presignRes = await fetch('/api/upload', {
+    const presignJson = await fetchApiJson<{ url: string }>('/api/upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filename, path, contentType: (file as File).type || 'image/jpeg' }),
     });
-    const { url } = await presignRes.json();
+    const { url } = presignJson;
     await fetch(url, {
       method: 'PUT',
       body: file,
