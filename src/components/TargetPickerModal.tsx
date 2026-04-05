@@ -33,7 +33,7 @@ export default function TargetPickerModal({
     if (!isOpen) return;
     setSelected('');
     setLoading(true);
-    fetch('/api/gallery?path=&json=1')
+    fetch('/api/gallery?path=&json=1&foldersOnly=1')
       .then(r => r.json())
       .then(data => {
         if (data.success) {

@@ -10,6 +10,7 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const path = searchParams.get('path') || '';
     const jsonMode = searchParams.get('json') === '1';
+    const foldersOnly = searchParams.get('foldersOnly') === '1';
     const continuationToken = searchParams.get('continuationToken') || undefined;
     const maxKeysParam = Number(searchParams.get('maxKeys') || 1000);
     const maxKeys = Number.isNaN(maxKeysParam) ? 1000 : Math.min(Math.max(maxKeysParam, 1), 1000);
@@ -41,6 +42,18 @@ export async function GET(request: Request) {
         return key.endsWith('.jpg') || key.endsWith('.jpeg') || key.endsWith('.png') || key.endsWith('.webp') || key.endsWith('.gif');
       });
       filesFiltered.sort((a, b) => naturalSort(a.Key!, b.Key!));
+
+      if (foldersOnly) {
+        return NextResponse.json({
+          success: true,
+          mode: 'json',
+          data: {
+            folders,
+            files: [],
+            currentPath: path,
+          },
+        });
+      }
 
       const files = await Promise.all(
         filesFiltered.map(async (file) => {

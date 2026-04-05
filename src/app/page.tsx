@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useState, useEffect, useCallback, Suspense, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Folder,
@@ -48,6 +48,7 @@ type GalleryFile = {
   type: 'image';
 };
 type GalleryData = { folders: GalleryFolder[]; files: GalleryFile[]; currentPath: string };
+type FileToDownload = { name: string; url: string; zipPath: string };
 
 const IMAGE_EXT_RE = /\.(jpg|jpeg|png|webp|gif)$/i;
 const naturalSort = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
@@ -123,10 +124,15 @@ function GalleryContent() {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-
-  // 下载终止控制器
-  const abortControllerRef = useState<AbortController | null>(null)[0];
   const [activeAbortController, setActiveAbortController] = useState<AbortController | null>(null);
+
+  const toastIdRef = useRef(0);
+  const galleryReqIdRef = useRef(0);
+  const galleryAbortRef = useRef<AbortController | null>(null);
+  const previewCacheRef = useRef<Map<string, string[]>>(new Map());
+  const previewInFlightRef = useRef<Map<string, Promise<string[]>>>(new Map());
+  const previewActiveCountRef = useRef(0);
+  const previewWaitersRef = useRef<Array<() => void>>([]);
 
   // 多选模式
   const [selectionMode, setSelectionMode] = useState(false);
@@ -135,9 +141,8 @@ function GalleryContent() {
 
   // Toast 系统
   const [toasts, setToasts] = useState<Toast[]>([]);
-  let toastId = 0;
   const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
-    const id = ++toastId;
+    const id = ++toastIdRef.current;
     setToasts(prev => [...prev, { id, message, type }]);
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
   }, []);
@@ -155,8 +160,30 @@ function GalleryContent() {
 
   const scrollToTop = () => window.scrollTo({ top: 0, behavior: 'smooth' });
 
+  const acquirePreviewSlot = useCallback(async () => {
+    const maxConcurrent = 4;
+    if (previewActiveCountRef.current < maxConcurrent) {
+      previewActiveCountRef.current += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => previewWaitersRef.current.push(resolve));
+    previewActiveCountRef.current += 1;
+  }, []);
+
+  const releasePreviewSlot = useCallback(() => {
+    previewActiveCountRef.current = Math.max(0, previewActiveCountRef.current - 1);
+    const next = previewWaitersRef.current.shift();
+    if (next) next();
+  }, []);
+
   // 获取文件列表（Signer Mode）：后端仅签名，前端直连 S3 拉 XML 并解析
   const fetchGallery = async (path: string) => {
+    const reqId = ++galleryReqIdRef.current;
+    galleryAbortRef.current?.abort();
+    const controller = new AbortController();
+    galleryAbortRef.current = controller;
+    const signal = controller.signal;
+
     setLoading(true);
     setError('');
     try {
@@ -166,13 +193,13 @@ function GalleryContent() {
 
       do {
         const tokenPart = continuationToken ? `&continuationToken=${encodeURIComponent(continuationToken)}` : '';
-        const signerRes = await fetch(`/api/gallery?path=${encodeURIComponent(path)}${tokenPart}`);
+        const signerRes = await fetch(`/api/gallery?path=${encodeURIComponent(path)}${tokenPart}`, { signal });
         const signerJson = await signerRes.json();
         if (!signerJson.success) {
           throw new Error(signerJson.message || '获取列表签名失败');
         }
 
-        const listRes = await fetch(signerJson.data.listUrl);
+        const listRes = await fetch(signerJson.data.listUrl, { signal });
         if (!listRes.ok) {
           throw new Error(`S3 列表请求失败: ${listRes.status}`);
         }
@@ -194,6 +221,7 @@ function GalleryContent() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
+          signal,
         });
         const signJson = await signRes.json();
         if (!signJson.success) {
@@ -219,44 +247,81 @@ function GalleryContent() {
         .filter((f): f is GalleryFile => Boolean(f));
 
       const folders = Array.from(foldersMap.values()).sort((a, b) => naturalSort(a.name, b.name));
-      setData({ folders, files, currentPath: path });
+      if (!signal.aborted && reqId === galleryReqIdRef.current) {
+        setData({ folders, files, currentPath: path });
+      }
     } catch (err: unknown) {
+      if ((err as { name?: string })?.name === 'AbortError') {
+        return;
+      }
       const msg = err instanceof Error ? err.message : '获取数据失败';
-      setError(msg);
+      if (reqId === galleryReqIdRef.current) {
+        setError(msg);
+      }
     } finally {
-      setLoading(false);
+      if (reqId === galleryReqIdRef.current) {
+        setLoading(false);
+      }
     }
   };
 
   // 文件夹缩略图也走直连：前端自己拿签名列表 + 解析 + 批量签图
   const fetchFolderPreviewDirect = useCallback(async (path: string): Promise<string[]> => {
-    const signerRes = await fetch(`/api/gallery?path=${encodeURIComponent(path)}&maxKeys=12`);
-    const signerJson = await signerRes.json();
-    if (!signerJson.success) return [];
+    const cached = previewCacheRef.current.get(path);
+    if (cached) return cached;
 
-    const listRes = await fetch(signerJson.data.listUrl);
-    if (!listRes.ok) return [];
+    const inFlight = previewInFlightRef.current.get(path);
+    if (inFlight) return inFlight;
 
-    const xmlText = await listRes.text();
-    const parsed = parseS3ListXml(xmlText, path);
-    const previewKeys = parsed.filesMeta.map((m) => m.key).slice(0, 3);
-    if (previewKeys.length === 0) return [];
+    const run = (async () => {
+      await acquirePreviewSlot();
+      try {
+        const signerRes = await fetch(`/api/gallery?path=${encodeURIComponent(path)}&maxKeys=12`);
+        const signerJson = await signerRes.json();
+        if (!signerJson.success) return [];
 
-    const signRes = await fetch('/api/gallery', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'sign-get-objects', keys: previewKeys }),
-    });
-    const signJson = await signRes.json();
-    if (!signJson.success) return [];
+        const listRes = await fetch(signerJson.data.listUrl);
+        if (!listRes.ok) return [];
 
-    return previewKeys.map((k) => signJson.data?.[k]).filter((u): u is string => Boolean(u));
-  }, []);
+        const xmlText = await listRes.text();
+        const parsed = parseS3ListXml(xmlText, path);
+        const previewKeys = parsed.filesMeta.map((m) => m.key).slice(0, 3);
+        if (previewKeys.length === 0) {
+          previewCacheRef.current.set(path, []);
+          return [];
+        }
+
+        const signRes = await fetch('/api/gallery', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'sign-get-objects', keys: previewKeys }),
+        });
+        const signJson = await signRes.json();
+        if (!signJson.success) return [];
+
+        const urls = previewKeys.map((k) => signJson.data?.[k]).filter((u): u is string => Boolean(u));
+        previewCacheRef.current.set(path, urls);
+        return urls;
+      } finally {
+        previewInFlightRef.current.delete(path);
+        releasePreviewSlot();
+      }
+    })();
+
+    previewInFlightRef.current.set(path, run);
+    return run;
+  }, [acquirePreviewSlot, releasePreviewSlot]);
 
   useEffect(() => {
     fetchGallery(currentPath);
     setViewMode(currentPath ? 'manga' : 'grid');
   }, [currentPath]);
+
+  useEffect(() => {
+    return () => {
+      galleryAbortRef.current?.abort();
+    };
+  }, []);
 
   // 页面卸载或路径切换时，自动取消正在进行的下载请求
   useEffect(() => {
@@ -314,38 +379,66 @@ function GalleryContent() {
     }
   };
 
+  const collectFolderFilesForZip = useCallback(async (folder: GalleryFolder, signal: AbortSignal): Promise<FileToDownload[]> => {
+    const out: FileToDownload[] = [];
+
+    const walk = async (path: string, zipPrefix: string) => {
+      if (signal.aborted) return;
+      const res = await fetch(`/api/gallery?path=${encodeURIComponent(path)}&json=1`, { signal });
+      const json = await res.json();
+      if (!json.success) return;
+
+      const files = (json.data.files || []) as GalleryFile[];
+      files.forEach((f) => {
+        out.push({ name: f.name, url: f.url, zipPath: `${zipPrefix}/${f.name}` });
+      });
+
+      const folders = (json.data.folders || []) as GalleryFolder[];
+      for (const child of folders) {
+        await walk(child.path, `${zipPrefix}/${child.name}`);
+      }
+    };
+
+    await walk(folder.path, folder.name);
+    return out;
+  }, []);
+
   // 智能下载：支持子目录结构感知 + 可选只下载选中项
-  const handleDownloadZip = async (overrideFiles?: any[]) => {
+  const handleDownloadZip = async (options?: { files?: GalleryFile[]; folders?: GalleryFolder[]; zipName?: string }) => {
     const controller = new AbortController();
     setActiveAbortController(controller);
     setDownloading(true);
     setDownloadProgress(0);
     
     // 如果是多选触发，立即退出多选模式
-    if (overrideFiles) {
+    if (options?.files || options?.folders) {
       exitSelectionMode();
     }
 
     const zip = new JSZip();
-    const folderName = currentPath.split('/').filter(Boolean).pop() || 'gallery-export';
+    const folderName = options?.zipName || currentPath.split('/').filter(Boolean).pop() || 'gallery-export';
 
     try {
       const signal = controller.signal;
 
       // 若当前路径下有子画集，递归获取结构
-      const hasSubFolders = data.folders.length > 0 && !overrideFiles;
-      let filesToDownload: { name: string; url: string; zipPath: string }[] = [];
+      const hasSubFolders = data.folders.length > 0 && !options?.files && !options?.folders;
+      let filesToDownload: FileToDownload[] = [];
 
-      if (overrideFiles) {
-        // 只下载选中文件（扁平）
-        filesToDownload = overrideFiles.map((f: any) => ({ name: f.name, url: f.url, zipPath: f.name }));
+      if (options?.files || options?.folders) {
+        const selectedFiles = options.files || [];
+        const selectedFolders = options.folders || [];
+
+        const fromFiles = selectedFiles.map((f) => ({ name: f.name, url: f.url, zipPath: f.name }));
+        const fromFolders = (await Promise.all(selectedFolders.map((folder) => collectFolderFilesForZip(folder, signal)))).flat();
+        filesToDownload = [...fromFiles, ...fromFolders];
       } else if (hasSubFolders) {
         // 保留子目录结构
-        const subFetchTasks = data.folders.map(async (folder: any) => {
+        const subFetchTasks = data.folders.map(async (folder: GalleryFolder) => {
           const res = await fetch(`/api/gallery?path=${encodeURIComponent(folder.path)}&json=1`, { signal });
           const json = await res.json();
           if (json.success) {
-            return (json.data.files as any[]).map((f: any) => ({
+            return (json.data.files as GalleryFile[]).map((f) => ({
               name: f.name,
               url: f.url,
               zipPath: `${folder.name}/${f.name}`,
@@ -354,12 +447,12 @@ function GalleryContent() {
           return [];
         });
         // 当前路径下的直接文件
-        const directFiles = data.files.map((f: any) => ({ name: f.name, url: f.url, zipPath: f.name }));
+        const directFiles = data.files.map((f) => ({ name: f.name, url: f.url, zipPath: f.name }));
         const nested = (await Promise.all(subFetchTasks)).flat();
         filesToDownload = [...directFiles, ...nested];
       } else {
         // 纯图集，扁平打包
-        filesToDownload = data.files.map((f: any) => ({ name: f.name, url: f.url, zipPath: f.name }));
+        filesToDownload = data.files.map((f) => ({ name: f.name, url: f.url, zipPath: f.name }));
       }
 
       if (filesToDownload.length === 0) { 
@@ -394,9 +487,11 @@ function GalleryContent() {
       setDownloadProgress(100);
       const content = await zip.generateAsync({ type: 'blob' });
       const link = document.createElement('a');
-      link.href = URL.createObjectURL(content);
+      const objectUrl = URL.createObjectURL(content);
+      link.href = objectUrl;
       link.download = `${folderName}.zip`;
       link.click();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
       addToast('打包下载成功', 'success');
     } catch (err: any) {
       if (err.name === 'AbortError') {
@@ -433,8 +528,10 @@ function GalleryContent() {
 
   // 批量下载（只含选中文件）
   const handleBatchDownload = () => {
-    const selectedFiles = data.files.filter((f: any) => selectedItems.has(f.path));
-    handleDownloadZip(selectedFiles);
+    const selectedFiles = data.files.filter((f) => selectedItems.has(f.path));
+    const selectedFolders = data.folders.filter((f) => selectedItems.has(f.path));
+    if (selectedFiles.length === 0 && selectedFolders.length === 0) return;
+    handleDownloadZip({ files: selectedFiles, folders: selectedFolders, zipName: 'all' });
   };
 
   // 后台执行移动/复制
