@@ -98,7 +98,7 @@ function GalleryContent() {
   // 获取文件列表
   const fetchGallery = async (path: string) => {
     setLoading(true);
-    setError(''); // 每次开始获取前重置错误状态
+    setError('');
     try {
       const res = await fetch(`/api/gallery?path=${encodeURIComponent(path)}`);
       const json = await res.json();
@@ -301,14 +301,6 @@ function GalleryContent() {
     }
   };
 
-  const handleCreateFolder = () => {
-    const name = prompt('输入新图集名称');
-    if (name) {
-      alert('图集将会在你上传第一张图后自动创建');
-    }
-  };
-
-  // 避免服务端水合不匹配
   if (!mounted) return null;
 
   const allKeys = [...data.folders.map((f: any) => f.path), ...data.files.map((f: any) => f.path)];
@@ -519,7 +511,7 @@ function GalleryContent() {
                 </div>
               )}
 
-              {/* 文件夹显示区域 */}
+              {/* 文件夹显示区域 (v0.5.0: 已取消预览数量限制) */}
               {!error && viewMode === 'grid' && data.folders.map((folder: any) => (
                 <FolderCard
                   key={folder.path}
@@ -561,7 +553,6 @@ function GalleryContent() {
                     </div>
                   )}
                   <div className={`${viewMode === 'grid' ? "w-full h-full relative overflow-hidden" : "w-full"} min-h-[300px] overflow-hidden flex items-center justify-center transition-all duration-300 relative`}>
-                    {/* 加载骨架屏背景 */}
                     <div className={`absolute inset-0 animate-pulse ${settings.theme === 'miku' ? 'bg-slate-100' : 'bg-white/5'}`} />
 
                     <img
@@ -699,23 +690,47 @@ export default function GalleryPage() {
   );
 }
 
-// 文件夹卡片组件：支持悬停幻灯片
+// 文件夹卡片组件：v0.5.0 重构支持异步封面加载
 function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSelected }: {
   folder: any; onClick: () => void; onDelete: () => void; settings: ISettings;
   selectionMode?: boolean; isSelected?: boolean;
 }) {
   const [currentIdx, setCurrentIdx] = useState(0);
   const [isHovered, setIsHovered] = useState(false);
+  const [previews, setPreviews] = useState<string[]>([]);
+  const [fetching, setFetching] = useState(false);
+
+  // v0.5.0 异步加载预览图逻辑
+  useEffect(() => {
+    let isMounted = true;
+    const fetchPreviews = async () => {
+      setFetching(true);
+      try {
+        const res = await fetch(`/api/gallery/folder-preview?path=${encodeURIComponent(folder.path)}`);
+        const json = await res.json();
+        if (isMounted && json.success) {
+          setPreviews(json.previews);
+        }
+      } catch (err) {
+        console.error("Fetch previews failed:", err);
+      } finally {
+        if (isMounted) setFetching(false);
+      }
+    };
+
+    fetchPreviews();
+    return () => { isMounted = false; };
+  }, [folder.path]);
 
   useEffect(() => {
     let timer: NodeJS.Timeout;
-    if (isHovered && folder.previews?.length > 1) {
+    if (isHovered && previews.length > 1) {
       timer = setInterval(() => {
-        setCurrentIdx((prev) => (prev + 1) % folder.previews.length);
-      }, 3000); // 用户要求 3 秒一次
+        setCurrentIdx((prev) => (prev + 1) % previews.length);
+      }, 3000);
     }
     return () => clearInterval(timer);
-  }, [isHovered, folder.previews]);
+  }, [isHovered, previews]);
 
   return (
     <motion.div
@@ -727,7 +742,6 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
             : 'bg-[#090909] border-white/10 hover:border-purple-500/50 hover:shadow-[0_10px_40px_rgba(147,51,234,0.15)]'
         }`}
     >
-      {/* 多选 Checkbox */}
       {selectionMode && (
         <div className="absolute top-3 left-3 z-20">
           <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${isSelected
@@ -745,21 +759,26 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
         className={`w-full h-full relative cursor-pointer overflow-hidden ${settings.theme === 'miku' ? 'bg-slate-50' : 'bg-white/5'}`}
       >
         <AnimatePresence mode="wait">
-          <motion.img
-            key={folder.previews?.[currentIdx] || 'empty'}
-            src={folder.previews?.[currentIdx]
-              ? `/api/proxy?url=${encodeURIComponent(folder.previews[currentIdx])}&thumbnail=true`
-              : '/folder-placeholder.png'}
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            transition={{ duration: 0.8 }}
-            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-[3s]"
-            onError={(e) => { (e.target as any).src = "https://placehold.co/400x300/111/555?text=Empty+Album"; }}
-          />
+          {fetching && previews.length === 0 ? (
+            <div key="loading" className="w-full h-full flex items-center justify-center animate-pulse bg-white/5">
+               <Loader2 className={`w-6 h-6 animate-spin ${settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-white/20'}`} />
+            </div>
+          ) : (
+            <motion.img
+              key={previews[currentIdx] || 'empty'}
+              src={previews[currentIdx]
+                ? `/api/proxy?url=${encodeURIComponent(previews[currentIdx])}&thumbnail=true`
+                : '/folder-placeholder.png'}
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              transition={{ duration: 0.8 }}
+              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-[3s]"
+              onError={(e) => { (e.target as any).src = "https://placehold.co/400x300/111/555?text=Album"; }}
+            />
+          )}
         </AnimatePresence>
 
-        {/* 指示器 */}
         <div className="absolute bottom-16 left-1/2 -translate-x-1/2 flex space-x-1 pointer-events-none">
-          {folder.previews?.map((_: any, i: number) => (
+          {previews.map((_: any, i: number) => (
             <div key={i} className={`h-1.5 rounded-full transition-all ${i === currentIdx ? (settings.theme === 'miku' ? 'w-4 bg-[#39C5BB] shadow-[0_0_10px_#39C5BB]' : 'w-4 bg-purple-500 shadow-[0_0_10px_#A855F7]') : 'w-1.5 bg-white/50'}`} />
           ))}
         </div>
@@ -773,14 +792,13 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
               </button>
             </div>
             <div className="flex items-center space-x-2">
-              <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-purple-500'}`} />
+              <div className={`w-1.5 h-1.5 rounded-full ${fetching ? 'animate-bounce' : 'animate-pulse'} ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-purple-500'}`} />
               <p className="text-[9px] font-bold uppercase tracking-widest text-white/60">画册合集</p>
             </div>
           </div>
         </div>
       </div>
 
-      {/* 底部光晕 (由设置项控制开关) */}
       {settings.glow && (
         <div className={`absolute -bottom-10 left-1/2 -translate-x-1/2 w-2/3 h-10 blur-2xl rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none ${settings.theme === 'miku' ? 'bg-[#39C5BB]/40' : 'bg-purple-500/30'}`} />
       )}

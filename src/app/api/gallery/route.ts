@@ -13,7 +13,7 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const path = searchParams.get('path') || ''; // 例如 'travel/'
 
-    // 1. 获取当前目录下的文件和文件夹
+    // 1. 获取当前目录下的文件和文件夹 (单次列表请求，极速)
     const command = new ListObjectsV2Command({
       Bucket: BUCKET_NAME,
       Prefix: path,
@@ -22,64 +22,19 @@ export async function GET(request: Request) {
 
     const response = await s3Client.send(command);
 
-    // 2. 提取文件夹 (CommonPrefixes) 并安全地增加预览图逻辑
+    // 2. 提取文件夹 (CommonPrefixes) 
+    // v0.5.0: 不再同步获取预览图，将负载转移到前端组件异步请求，彻底解决 N+1 延迟问题
     const foldersRaw = response.CommonPrefixes || [];
-    
-    // 限制：如果当前目录下的文件夹非常多，我们只为前 15 个文件夹生成预览，
-    // 防止并发请求过多导致跨境网络连接崩溃或严重超时 (N+1 问题)
-    const foldersToProcess = foldersRaw.slice(0, 15);
-    
-    const folders = await Promise.all(
-      foldersRaw.map(async (cp, index) => {
-        const folderPath = cp.Prefix!;
-        const folderName = folderPath.replace(path, '').replace('/', '') || '';
-        
-        let previewUrls: string[] = [];
-        
-        // 只有在索引范围内的文件夹才尝试获取预览，且捕获异常
-        if (index < 15) {
-          try {
-            // 给预览图获取设置一个极短的逻辑超时控制（虽然 SDK 有全局超时，但这里我们主动控制）
-            const previewCommand = new ListObjectsV2Command({
-              Bucket: BUCKET_NAME,
-              Prefix: folderPath,
-              MaxKeys: 8, 
-            });
-            
-            // 发起请求，但不让它阻塞主流程太久
-            const previewsRes = await s3Client.send(previewCommand).catch(() => null);
-            
-            if (previewsRes && previewsRes.Contents) {
-              const previewFiles = previewsRes.Contents
-                .filter(c => c.Key && c.Key !== folderPath && c.Key.toLowerCase().match(/\.(jpg|jpeg|png|webp|gif)$/))
-                .slice(0, 3);
-
-              previewUrls = await Promise.all(
-                previewFiles.map(async (f) => {
-                  return await getSignedUrl(
-                    s3Client,
-                    new GetObjectCommand({ Bucket: BUCKET_NAME, Key: f.Key! }),
-                    { expiresIn: 3600 }
-                  ).catch(() => "");
-                })
-              );
-              // 过滤掉空的 URL
-              previewUrls = previewUrls.filter(u => u !== "");
-            }
-          } catch (e) {
-            console.error(`Failed to fetch previews for folder ${folderName}:`, e);
-            // 预览图失败不应该导致整个 API 挂掉
-          }
-        }
-
-        return {
-          name: folderName,
-          path: folderPath,
-          type: 'folder',
-          previews: previewUrls
-        };
-      })
-    );
+    const folders = foldersRaw.map((cp) => {
+      const folderPath = cp.Prefix!;
+      return {
+        name: folderPath.replace(path, '').replace('/', '') || '',
+        path: folderPath,
+        type: 'folder',
+        // 预览图改为由前端根据 path 异步加载，接口初始返回空数组
+        previews: []
+      };
+    });
 
     // 3. 提取并排序图片文件
     const filesRaw = response.Contents || [];
@@ -130,7 +85,7 @@ export async function GET(request: Request) {
   } catch (error: any) {
     console.error('S3 List Error:', error);
     return NextResponse.json(
-      { success: false, message: error.message || '获取列表失败，请检查网络连接或 OSS 配置' },
+      { success: false, message: error.message || '获取列表失败' },
       { status: 500 }
     );
   }
