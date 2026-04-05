@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, Suspense } from 'react';
+import { useState, useEffect, useCallback, Suspense } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Folder, 
@@ -8,26 +8,32 @@ import {
   ChevronRight, 
   Upload, 
   Download, 
-  Search,
   LogOut,
-  Plus,
-  MoreVertical,
-  ArrowLeft,
   Loader2,
   HardDrive,
   Trash2,
   LayoutGrid,
   Rows,
-  AlertTriangle,
   ArrowUp,
-  Settings2
+  Settings2,
+  CheckSquare,
+  Square,
+  Scissors,
+  Copy,
+  CheckCircle2,
+  XCircle,
+  X as XIcon,
 } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import UploadModal from '@/components/UploadModal';
 import SettingsModal from '@/components/SettingsModal';
+import TargetPickerModal from '@/components/TargetPickerModal';
 import JSZip from 'jszip';
 import { BUCKET_NAME } from '@/lib/s3';
 import { useSettings, ISettings } from '@/lib/useSettings';
+
+// Toast 消息类型
+type Toast = { id: number; message: string; type: 'info' | 'success' | 'error' };
 
 // 视图模式：网格 或 漫画模式（纵向平铺）
 type ViewMode = 'grid' | 'manga';
@@ -60,7 +66,21 @@ function GalleryContent() {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  
+
+  // 多选模式
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
+  const [pendingAction, setPendingAction] = useState<'move' | 'copy' | null>(null);
+
+  // Toast 系统
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  let toastId = 0;
+  const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
+    const id = ++toastId;
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+  }, []);
+
   const { settings, updateSettings, mounted } = useSettings();
 
   // 监听滚动条以显示/隐藏回顶按钮
@@ -110,34 +130,83 @@ function GalleryContent() {
     router.push(`/?path=${encodeURIComponent(newPath)}`);
   };
 
-  // 打包下载当前图集 (Client-side)
-  const handleDownloadZip = async () => {
-    if (data.files.length === 0) return;
+  // 多选 helpers
+  const toggleSelection = (key: string) => {
+    setSelectedItems(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  };
+  const toggleSelectAll = () => {
+    const allKeys = [
+      ...data.folders.map((f: any) => f.path),
+      ...data.files.map((f: any) => f.path),
+    ];
+    if (selectedItems.size === allKeys.length) {
+      setSelectedItems(new Set());
+    } else {
+      setSelectedItems(new Set(allKeys));
+    }
+  };
+  const exitSelectionMode = () => {
+    setSelectionMode(false);
+    setSelectedItems(new Set());
+  };
+
+  // 智能下载：支持子目录结构感知 + 可选只下载选中项
+  const handleDownloadZip = async (overrideFiles?: any[]) => {
     setDownloading(true);
     setDownloadProgress(0);
-    
+    const zip = new JSZip();
+    const folderName = currentPath.split('/').filter(Boolean).pop() || 'gallery-export';
+
     try {
-      const zip = new JSZip();
-      const folderName = currentPath.split('/').filter(Boolean).pop() || 'gallery-export';
-      
+      // 若当前路径下有子画集，递归获取结构
+      const hasSubFolders = data.folders.length > 0 && !overrideFiles;
+      let filesToDownload: { name: string; url: string; zipPath: string }[] = [];
+
+      if (overrideFiles) {
+        // 只下载选中文件（扁平）
+        filesToDownload = overrideFiles.map((f: any) => ({ name: f.name, url: f.url, zipPath: f.name }));
+      } else if (hasSubFolders) {
+        // 保留子目录结构
+        const subFetchTasks = data.folders.map(async (folder: any) => {
+          const res = await fetch(`/api/gallery?path=${encodeURIComponent(folder.path)}`);
+          const json = await res.json();
+          if (json.success) {
+            return (json.data.files as any[]).map((f: any) => ({
+              name: f.name,
+              url: f.url,
+              zipPath: `${folder.name}/${f.name}`,
+            }));
+          }
+          return [];
+        });
+        // 当前路径下的直接文件
+        const directFiles = data.files.map((f: any) => ({ name: f.name, url: f.url, zipPath: f.name }));
+        const nested = (await Promise.all(subFetchTasks)).flat();
+        filesToDownload = [...directFiles, ...nested];
+      } else {
+        // 纯图集，扁平打包
+        filesToDownload = data.files.map((f: any) => ({ name: f.name, url: f.url, zipPath: f.name }));
+      }
+
+      if (filesToDownload.length === 0) { setDownloading(false); return; }
+
       let completed = 0;
-      const total = data.files.length;
+      const total = filesToDownload.length;
+      for (let i = 0; i < filesToDownload.length; i += 5) {
+        const chunk = filesToDownload.slice(i, i + 5);
+        await Promise.all(chunk.map(async (file) => {
+          const res = await fetch(`/api/proxy?url=${encodeURIComponent(file.url)}`);
+          const blob = await res.blob();
+          zip.file(file.zipPath, blob);
+          completed++;
+          setDownloadProgress(Math.round((completed / total) * 100));
+        }));
+      }
 
-      const fetchInChunks = async (files: any[]) => {
-        for (let i = 0; i < files.length; i += 5) {
-          const chunk = files.slice(i, i + 5);
-          await Promise.all(chunk.map(async (file) => {
-            // 通过后端代理绕过 CORS 限制
-            const response = await fetch(`/api/proxy?url=${encodeURIComponent(file.url)}`);
-            const blob = await response.blob();
-            zip.file(file.name, blob);
-            completed++;
-            setDownloadProgress(Math.round((completed / total) * 100));
-          }));
-        }
-      };
-
-      await fetchInChunks(data.files);
       setDownloadProgress(100);
       const content = await zip.generateAsync({ type: 'blob' });
       const link = document.createElement('a');
@@ -146,10 +215,61 @@ function GalleryContent() {
       link.click();
     } catch (err) {
       console.error('Download error:', err);
-      alert('打包下载失败');
+      addToast('打包下载失败', 'error');
     } finally {
       setDownloading(false);
       setDownloadProgress(0);
+    }
+  };
+
+  // 批量删除
+  const handleBatchDelete = async () => {
+    const count = selectedItems.size;
+    if (!confirm(`确认删除选中的 ${count} 个项目？此操作不可撤销。`)) return;
+    try {
+      const paths = Array.from(selectedItems);
+      await fetch('/api/gallery/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', paths }),
+      });
+      addToast(`已删除 ${count} 个文件`, 'success');
+      exitSelectionMode();
+      fetchGallery(currentPath);
+    } catch {
+      addToast('删除失败，请重试', 'error');
+    }
+  };
+
+  // 批量下载（只含选中文件）
+  const handleBatchDownload = () => {
+    const selectedFiles = data.files.filter((f: any) => selectedItems.has(f.path));
+    handleDownloadZip(selectedFiles);
+  };
+
+  // 后台执行移动/复制
+  const handleTargetConfirm = async (dest: string) => {
+    const action = pendingAction!;
+    const paths = Array.from(selectedItems);
+    const label = action === 'move' ? '移动' : '复制';
+    addToast(`⏳ 正在后台${label} ${paths.length} 个文件，完成后自动刷新…`, 'info');
+    setPendingAction(null);
+    exitSelectionMode();
+    try {
+      const res = await fetch('/api/gallery/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, paths, dest: dest ? `${dest}` : '' }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        addToast(`✓ ${label}完成，已刷新画廊`, 'success');
+        fetchGallery(currentPath);
+      } else {
+        addToast(`${label}失败：${json.message}`, 'error');
+      }
+    } catch {
+      addToast(`${label}失败，请重试`, 'error');
     }
   };
 
@@ -189,12 +309,38 @@ function GalleryContent() {
   // 避免服务端水合不匹配
   if (!mounted) return null;
 
+  const allKeys = [...data.folders.map((f: any) => f.path), ...data.files.map((f: any) => f.path)];
+
   return (
     <div className={`min-h-screen selection:bg-purple-500/30 transition-colors duration-1000 ${
       settings.theme === 'miku' 
         ? (viewMode === 'manga' ? 'bg-[#f0f4f8] text-slate-800 bg-fixed' : 'bg-[#fafcff] text-slate-800')
         : (viewMode === 'manga' ? 'bg-gradient-to-br from-[#1b1429] via-[#050505] to-[#0c1838] bg-fixed text-white' : 'bg-[#050505] text-white')
     }`}>
+      {/* Toast 通知层 */}
+      <div className="fixed top-6 right-6 z-[200] space-y-2 pointer-events-none">
+        <AnimatePresence>
+          {toasts.map(t => (
+            <motion.div
+              key={t.id}
+              initial={{ opacity: 0, x: 60, scale: 0.9 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: 60, scale: 0.9 }}
+              className={`flex items-center space-x-2 px-4 py-3 rounded-2xl shadow-2xl text-sm font-bold pointer-events-auto backdrop-blur-xl border ${
+                t.type === 'success'
+                  ? (settings.theme === 'miku' ? 'bg-[#39C5BB]/10 border-[#39C5BB]/30 text-[#2a9a92]' : 'bg-green-500/10 border-green-500/30 text-green-400')
+                  : t.type === 'error'
+                  ? 'bg-red-500/10 border-red-500/30 text-red-400'
+                  : (settings.theme === 'miku' ? 'bg-white/90 border-slate-200 text-slate-700' : 'bg-white/10 border-white/20 text-white')
+              }`}
+            >
+              {t.type === 'success' ? <CheckCircle2 size={14} /> : t.type === 'error' ? <XCircle size={14} /> : <Loader2 size={14} className="animate-spin" />}
+              <span>{t.message}</span>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
       <SettingsModal 
         isOpen={isSettingsOpen} 
         onClose={() => setIsSettingsOpen(false)} 
@@ -207,6 +353,15 @@ function GalleryContent() {
         onClose={() => setIsUploadOpen(false)} 
         currentPath={currentPath}
         onRefresh={() => fetchGallery(currentPath)}
+      />
+
+      <TargetPickerModal
+        isOpen={pendingAction !== null}
+        onClose={() => setPendingAction(null)}
+        onConfirm={handleTargetConfirm}
+        title={pendingAction === 'move' ? '移动到' : '复制到'}
+        settings={settings}
+        currentPath={currentPath}
       />
 
       {/* 下载进度条 */}
@@ -292,21 +447,45 @@ function GalleryContent() {
             ))}
           </nav>
 
-          <div className={`flex items-center space-x-3 p-1 rounded-2xl border ${settings.theme === 'miku' ? 'bg-white border-[#39C5BB]/20 shadow-sm' : 'bg-white/5 border-white/5'}`}>
-             <button 
-              onClick={() => setViewMode('grid')}
-              className={`p-2 rounded-xl transition-all ${viewMode === 'grid' ? (settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-white/10 text-white shadow-xl') : (settings.theme === 'miku' ? 'text-slate-400 hover:text-slate-600' : 'text-white/30 hover:text-white/60')}`}
-             >
-                <LayoutGrid size={18} />
-             </button>
-             <button 
-              onClick={() => setViewMode('manga')}
-              className={`p-2 rounded-xl transition-all ${viewMode === 'manga' ? (settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-white/10 text-white shadow-xl') : (settings.theme === 'miku' ? 'text-slate-400 hover:text-slate-600' : 'text-white/30 hover:text-white/60')}`}
-             >
-                <Rows size={18} />
-             </button>
-             <div className={`w-[1px] h-4 mx-1 ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`} />
-             <button onClick={handleDownloadZip} title="下载所有内容" className={`p-2 transition-colors ${settings.theme === 'miku' ? 'text-slate-400 hover:text-[#39C5BB]' : 'text-white/30 hover:text-blue-400'}`}><Download size={18} /></button>
+          <div className={`flex items-center space-x-2 p-1 rounded-2xl border ${settings.theme === 'miku' ? 'bg-white border-[#39C5BB]/20 shadow-sm' : 'bg-white/5 border-white/5'}`}>
+             {!selectionMode ? (
+               <>
+                 <button 
+                  onClick={() => setViewMode('grid')}
+                  className={`p-2 rounded-xl transition-all ${viewMode === 'grid' ? (settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-white/10 text-white shadow-xl') : (settings.theme === 'miku' ? 'text-slate-400 hover:text-slate-600' : 'text-white/30 hover:text-white/60')}`}
+                 >
+                    <LayoutGrid size={18} />
+                 </button>
+                 <button 
+                  onClick={() => setViewMode('manga')}
+                  className={`p-2 rounded-xl transition-all ${viewMode === 'manga' ? (settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-white/10 text-white shadow-xl') : (settings.theme === 'miku' ? 'text-slate-400 hover:text-slate-600' : 'text-white/30 hover:text-white/60')}`}
+                 >
+                    <Rows size={18} />
+                 </button>
+                 <div className={`w-[1px] h-4 mx-1 ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`} />
+                 <button onClick={() => handleDownloadZip()} title="下载所有内容" className={`p-2 transition-colors ${settings.theme === 'miku' ? 'text-slate-400 hover:text-[#39C5BB]' : 'text-white/30 hover:text-blue-400'}`}><Download size={18} /></button>
+                 <div className={`w-[1px] h-4 mx-1 ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`} />
+                 <button
+                   onClick={() => setSelectionMode(true)}
+                   title="多选模式"
+                   className={`p-2 rounded-xl transition-all ${settings.theme === 'miku' ? 'text-slate-400 hover:text-[#39C5BB] hover:bg-[#39C5BB]/10' : 'text-white/30 hover:text-white/70 hover:bg-white/10'}`}
+                 >
+                   <CheckSquare size={18} />
+                 </button>
+               </>
+             ) : (
+               <>
+                 <button onClick={toggleSelectAll} className={`px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider transition-all ${
+                   settings.theme === 'miku' ? 'text-[#39C5BB] hover:bg-[#39C5BB]/10' : 'text-purple-400 hover:bg-purple-500/10'
+                 }`}>
+                   {selectedItems.size === allKeys.length ? '取消全选' : '全选'}
+                 </button>
+                 <div className={`w-[1px] h-4 ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`} />
+                 <button onClick={exitSelectionMode} className={`p-2 rounded-xl transition-all ${
+                   settings.theme === 'miku' ? 'text-slate-500 hover:text-red-500 hover:bg-red-50' : 'text-white/40 hover:text-red-400 hover:bg-red-500/10'
+                 }`}><XIcon size={18} /></button>
+               </>
+             )}
           </div>
         </div>
 
@@ -328,9 +507,11 @@ function GalleryContent() {
                 <FolderCard 
                   key={folder.path} 
                   folder={folder} 
-                  onClick={() => handleFolderClick(folder.path)} 
+                  onClick={() => selectionMode ? toggleSelection(folder.path) : handleFolderClick(folder.path)} 
                   onDelete={() => handleDelete(folder.path, 'folder')}
                   settings={settings}
+                  selectionMode={selectionMode}
+                  isSelected={selectedItems.has(folder.path)}
                 />
               ))}
 
@@ -339,16 +520,31 @@ function GalleryContent() {
                 <motion.div
                   key={file.path} 
                   variants={itemVariants}
-                  layout 
+                  layout
+                  onClick={() => { if (selectionMode) toggleSelection(file.path); }}
                   className={viewMode === 'grid' ? 
                     `group relative rounded-3xl overflow-hidden transition-all duration-500 border aspect-[3/4] ${
-                      settings.theme === 'miku'
+                      selectionMode && selectedItems.has(file.path)
+                        ? (settings.theme === 'miku' ? 'border-[#39C5BB] shadow-[0_0_0_3px_rgba(57,197,187,0.3)] bg-white' : 'border-purple-500 shadow-[0_0_0_3px_rgba(168,85,247,0.3)] bg-[#090909]')
+                        : settings.theme === 'miku'
                         ? 'bg-white border-[#39C5BB]/20 hover:border-[#39C5BB] hover:shadow-[0_10px_30px_rgba(57,197,187,0.15)]'
                         : 'bg-[#090909] border-white/10 hover:border-purple-500/50 hover:shadow-[0_0_30px_rgba(147,51,234,0.15)]'
                     }` :
                     "w-full bg-transparent flex flex-col items-center relative group"
                   }
                 >
+                  {/* 多选 Checkbox */}
+                  {selectionMode && viewMode === 'grid' && (
+                    <div className="absolute top-3 left-3 z-20">
+                      <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
+                        selectedItems.has(file.path)
+                          ? (settings.theme === 'miku' ? 'bg-[#39C5BB] border-[#39C5BB]' : 'bg-purple-500 border-purple-500')
+                          : 'bg-black/30 border-white/60 backdrop-blur-sm'
+                      }`}>
+                        {selectedItems.has(file.path) && <CheckSquare size={12} className="text-white" />}
+                      </div>
+                    </div>
+                  )}
                   <div className={viewMode === 'grid' ? "w-full h-full relative overflow-hidden" : "w-full"}>
                     <img src={file.url} alt={file.name} loading="lazy" className={viewMode === 'grid' ? "w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium" : "w-full h-auto select-none"} />
                     
@@ -399,6 +595,68 @@ function GalleryContent() {
         )}
       </main>
 
+      {/* 多选批量操作底栏 */}
+      <AnimatePresence>
+        {selectionMode && (
+          <motion.div
+            initial={{ y: 100, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 100, opacity: 0 }}
+            className="fixed bottom-0 left-0 right-0 z-[80] p-4"
+          >
+            <div className={`max-w-lg mx-auto rounded-3xl border p-4 shadow-2xl backdrop-blur-xl flex items-center justify-between gap-3 ${
+              settings.theme === 'miku' ? 'bg-white/90 border-[#39C5BB]/30' : 'bg-[#111]/90 border-white/10'
+            }`}>
+              <span className={`text-sm font-black shrink-0 ${
+                settings.theme === 'miku' ? 'text-slate-700' : 'text-white'
+              }`}>
+                已选 <span style={{ color: settings.theme === 'miku' ? '#39C5BB' : '#a855f7' }}>{selectedItems.size}</span> 项
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleBatchDownload}
+                  disabled={selectedItems.size === 0}
+                  title="下载选中"
+                  className={`p-2.5 rounded-2xl transition-all disabled:opacity-30 ${
+                    settings.theme === 'miku' ? 'bg-slate-100 hover:bg-[#39C5BB]/10 text-slate-500 hover:text-[#39C5BB]' : 'bg-white/5 hover:bg-white/10 text-white/50 hover:text-white'
+                  }`}
+                >
+                  <Download size={17} />
+                </button>
+                <button
+                  onClick={() => setPendingAction('copy')}
+                  disabled={selectedItems.size === 0}
+                  title="复制到"
+                  className={`p-2.5 rounded-2xl transition-all disabled:opacity-30 ${
+                    settings.theme === 'miku' ? 'bg-slate-100 hover:bg-[#39C5BB]/10 text-slate-500 hover:text-[#39C5BB]' : 'bg-white/5 hover:bg-white/10 text-white/50 hover:text-white'
+                  }`}
+                >
+                  <Copy size={17} />
+                </button>
+                <button
+                  onClick={() => setPendingAction('move')}
+                  disabled={selectedItems.size === 0}
+                  title="移动到"
+                  className={`p-2.5 rounded-2xl transition-all disabled:opacity-30 ${
+                    settings.theme === 'miku' ? 'bg-slate-100 hover:bg-[#39C5BB]/10 text-slate-500 hover:text-[#39C5BB]' : 'bg-white/5 hover:bg-white/10 text-white/50 hover:text-white'
+                  }`}
+                >
+                  <Scissors size={17} />
+                </button>
+                <button
+                  onClick={handleBatchDelete}
+                  disabled={selectedItems.size === 0}
+                  title="删除选中"
+                  className="p-2.5 rounded-2xl transition-all disabled:opacity-30 bg-red-500/10 hover:bg-red-500/20 text-red-400 hover:text-red-500"
+                >
+                  <Trash2 size={17} />
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <style jsx global>{`
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
@@ -416,7 +674,10 @@ export default function GalleryPage() {
 }
 
 // 文件夹卡片组件：支持悬停幻灯片
-function FolderCard({ folder, onClick, onDelete, settings }: { folder: any; onClick: () => void; onDelete: () => void; settings: ISettings }) {
+function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSelected }: { 
+  folder: any; onClick: () => void; onDelete: () => void; settings: ISettings;
+  selectionMode?: boolean; isSelected?: boolean;
+}) {
   const [currentIdx, setCurrentIdx] = useState(0);
   const [isHovered, setIsHovered] = useState(false);
 
@@ -432,13 +693,27 @@ function FolderCard({ folder, onClick, onDelete, settings }: { folder: any; onCl
 
   return (
     <motion.div
-      whileHover={{ y: -6 }}
+      whileHover={{ y: selectionMode ? 0 : -6 }}
       className={`group relative rounded-3xl overflow-hidden transition-all duration-300 border aspect-[3/4] ${
-        settings.theme === 'miku' 
+        isSelected
+          ? (settings.theme === 'miku' ? 'border-[#39C5BB] shadow-[0_0_0_3px_rgba(57,197,187,0.3)] bg-white' : 'border-purple-500 shadow-[0_0_0_3px_rgba(168,85,247,0.3)] bg-[#090909]')
+          : settings.theme === 'miku' 
           ? 'bg-white border-[#39C5BB]/20 hover:border-[#39C5BB] hover:shadow-[0_10px_40px_rgba(57,197,187,0.2)]'
           : 'bg-[#090909] border-white/10 hover:border-purple-500/50 hover:shadow-[0_10px_40px_rgba(147,51,234,0.15)]'
       }`}
     >
+      {/* 多选 Checkbox */}
+      {selectionMode && (
+        <div className="absolute top-3 left-3 z-20">
+          <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
+            isSelected
+              ? (settings.theme === 'miku' ? 'bg-[#39C5BB] border-[#39C5BB]' : 'bg-purple-500 border-purple-500')
+              : 'bg-black/30 border-white/60 backdrop-blur-sm'
+          }`}>
+            {isSelected && <CheckSquare size={12} className="text-white" />}
+          </div>
+        </div>
+      )}
       <div 
         onClick={onClick} 
         onMouseEnter={() => setIsHovered(true)}
