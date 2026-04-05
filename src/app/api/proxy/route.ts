@@ -1,18 +1,70 @@
 import { NextResponse } from 'next/server';
 import sharp from 'sharp';
+import { requireApiAuth } from '@/lib/auth';
+
+const PROXY_TIMEOUT_MS = 15000;
+
+function getAllowedProxyHosts(): Set<string> {
+  const hosts = new Set<string>();
+  const endpoint = process.env.S3_ENDPOINT;
+  if (endpoint) {
+    try {
+      hosts.add(new URL(endpoint).hostname.toLowerCase());
+    } catch {
+      // Ignore invalid endpoint format and rely on explicit whitelist.
+    }
+  }
+
+  const extraHosts = process.env.PROXY_ALLOWED_HOSTS;
+  if (extraHosts) {
+    extraHosts
+      .split(',')
+      .map((v) => v.trim().toLowerCase())
+      .filter(Boolean)
+      .forEach((host) => hosts.add(host));
+  }
+  return hosts;
+}
 
 export async function GET(request: Request) {
   try {
+    const unauthorized = await requireApiAuth(request);
+    if (unauthorized) return unauthorized;
+
     const { searchParams } = new URL(request.url);
     const url = searchParams.get('url');
     // thumb 标志位：开启缩略图模式
     const isThumbnail = searchParams.get('thumbnail') === 'true';
 
     if (!url) {
-      return new NextResponse('Missing URL', { status: 400 });
+      return NextResponse.json({ success: false, message: 'Missing URL' }, { status: 400 });
     }
 
-    const response = await fetch(url);
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      return NextResponse.json({ success: false, message: 'URL 格式不合法' }, { status: 400 });
+    }
+
+    if (parsedUrl.protocol !== 'https:') {
+      return NextResponse.json({ success: false, message: '仅允许 https 协议' }, { status: 400 });
+    }
+
+    const allowedHosts = getAllowedProxyHosts();
+    if (allowedHosts.size === 0 || !allowedHosts.has(parsedUrl.hostname.toLowerCase())) {
+      return NextResponse.json({ success: false, message: '目标域名不在白名单中' }, { status: 403 });
+    }
+
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), PROXY_TIMEOUT_MS);
+
+    let response: Response;
+    try {
+      response = await fetch(parsedUrl.toString(), { signal: abortController.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
     if (!response.ok) {
       throw new Error(`Failed to fetch from S3: ${response.statusText}`);
     }
@@ -48,7 +100,10 @@ export async function GET(request: Request) {
       },
     });
   } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      return NextResponse.json({ success: false, message: '上游请求超时' }, { status: 504 });
+    }
     console.error('Proxy Error:', error);
-    return new NextResponse(error.message, { status: 500 });
+    return NextResponse.json({ success: false, message: error.message || '代理请求失败' }, { status: 500 });
   }
 }

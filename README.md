@@ -52,5 +52,10 @@ S3_SECRET_KEY="云存密匙"
 
 ADMIN_USER="管理员用户名"
 ADMIN_PASS="管理员密码"
-AUTH_SECRET="用作登录令牌防篡改的随机哈希密钥"
+AUTH_SECRET="至少16位随机字符串，用作登录令牌防篡改密钥（必填）"
+PROXY_ALLOWED_HOSTS="可选，逗号分隔的代理白名单域名"
 ```
+
+说明：
+1. 当 AUTH_SECRET 缺失或过短时，服务端会拒绝鉴权相关接口请求，避免带病运行。
+2. PROXY_ALLOWED_HOSTS 未设置时，代理仅放行 S3_ENDPOINT 对应域名。
