@@ -2,7 +2,7 @@
 
 本文档覆盖从零开始部署 Misery Photo 1.0.0，包括：
 
-- 选择并创建 KV（Vercel KV 或 Cloudflare KV）
+- 选择并创建 KV（Vercel + Upstash Redis 或 Cloudflare KV）
 - 配置环境变量
 - 首次上线与验证
 - 常见故障排查
@@ -25,21 +25,25 @@
 3. 密钥安全：`accessKeyId` 和 `secretAccessKey` 都会在服务端加密后写入 KV。
 4. 本版本不做旧 Cookie 自动迁移：升级后请手动在设置中心重新添加存储桶。
 
-## 3. 创建 KV（方案 A：Vercel KV）
+## 3. 创建 KV（方案 A：Vercel + Upstash Redis）
 
-推荐优先使用此方案，步骤最少。
+很多 Vercel 账号在 Storage 页面不再直接显示 KV，而是显示 Upstash。此时按下面步骤即可。
 
 1. 打开 Vercel 控制台。
 2. 进入 Storage 页面，点击 Create Database。
-3. 选择 KV，创建一个实例（例如 `misery-photo-kv`）。
-4. 创建完成后，进入该 KV 的 Connect/Environment Variables 面板。
-5. 记录以下变量：
-   - `KV_REST_API_URL`
-   - `KV_REST_API_TOKEN`
-6. 在你的项目环境变量中设置：
+3. 选择 Upstash，创建 Redis 实例（例如 misery-photo-kv）。
+4. 在 Integration/Connect 中把它连接到当前 Vercel 项目。
+5. Vercel 会自动注入变量（名称通常如下）：
+   - `UPSTASH_REDIS_REST_URL`
+   - `UPSTASH_REDIS_REST_TOKEN`
+6. 在项目环境变量中设置：
    - `BUCKET_STORE_PROVIDER=vercel`
-   - `KV_REST_API_URL=<上一步值>`
-   - `KV_REST_API_TOKEN=<上一步值>`
+7. 其余变量无需手工映射，代码会自动读取：
+   - URL：`KV_REST_API_URL`，若为空则回退 `UPSTASH_REDIS_REST_URL`
+   - 读 Token：`KV_REST_API_READ_ONLY_TOKEN`，若为空则回退 `KV_REST_API_TOKEN` / `UPSTASH_REDIS_REST_TOKEN`
+   - 写 Token：`KV_REST_API_TOKEN`，若为空则回退 `UPSTASH_REDIS_REST_TOKEN`
+
+说明：本项目把 Upstash REST 作为 Vercel 路径下的 KV 兼容接口使用。你也可以显式填写 `KV_REST_API_URL`/`KV_REST_API_TOKEN` 覆盖自动注入。
 
 ## 4. 创建 KV（方案 B：Cloudflare KV）
 
@@ -67,8 +71,11 @@ AUTH_SECRET=your_32_chars_random_secret
 BUCKET_ENCRYPTION_KEY=your_32_chars_random_key
 
 BUCKET_STORE_PROVIDER=vercel
-KV_REST_API_URL=...
-KV_REST_API_TOKEN=...
+KV_REST_API_URL=... # 可选，未配置时自动读取 UPSTASH_REDIS_REST_URL
+KV_REST_API_TOKEN=... # 可选，未配置时自动读取 UPSTASH_REDIS_REST_TOKEN
+KV_REST_API_READ_ONLY_TOKEN=... # 可选，仅用于读
+UPSTASH_REDIS_REST_URL=...
+UPSTASH_REDIS_REST_TOKEN=...
 
 # 或使用 Cloudflare KV：
 # BUCKET_STORE_PROVIDER=cloudflare
@@ -101,6 +108,22 @@ PROXY_ALLOWED_HOSTS=
 5. 使用 `ADMIN_USER` / `ADMIN_PASS` 登录。
 6. 打开设置中心，新增存储桶并点击“测试连接”。
 7. 保存并激活后，返回首页验证列表、上传、下载、批量操作是否正常。
+
+## 6.1 自建服务器部署（VPS / Docker / 裸机）
+
+本项目并不依赖 Vercel，可以部署在任意可运行 Next.js 的 Node.js 环境。
+
+推荐做法：
+
+1. 应用部署在自建服务器。
+2. 桶配置存储仍使用外部 KV（Upstash 或 Cloudflare KV），减少自建状态服务复杂度。
+3. 在服务器环境变量中设置与 Vercel 相同的变量名。
+
+若你坚持使用自建 Redis：
+
+1. 本项目当前走 REST 协议，不直接使用 Redis TCP 协议。
+2. 需要先提供一个 Redis REST 网关，然后把网关地址填到 `KV_REST_API_URL`，并配置对应 Token。
+3. 仅设置 `REDIS_URL` / `KV_URL` 不足以直接驱动当前实现。
 
 ## 7. 验证清单
 

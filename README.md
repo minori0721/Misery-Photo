@@ -7,9 +7,11 @@
 1. Fork 仓库并在 Vercel 创建项目。
 2. 配置管理员与安全环境变量：`ADMIN_USER`、`ADMIN_PASS`、`AUTH_SECRET`、`BUCKET_ENCRYPTION_KEY`。
 3. 选择 KV 方案：
-   - `BUCKET_STORE_PROVIDER=vercel`，配置 `KV_REST_API_URL` 和 `KV_REST_API_TOKEN`。
-   - 或 `BUCKET_STORE_PROVIDER=cloudflare`，配置 `CF_ACCOUNT_ID`、`CF_KV_NAMESPACE_ID`、`CF_API_TOKEN`。
+ - `BUCKET_STORE_PROVIDER=vercel`：可直接使用 Upstash 自动注入变量（`UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`），也支持显式配置 `KV_REST_API_URL` / `KV_REST_API_TOKEN`。
+ - `BUCKET_STORE_PROVIDER=cloudflare`：配置 `CF_ACCOUNT_ID`、`CF_KV_NAMESPACE_ID`、`CF_API_TOKEN`。
 4. 部署完成后，登录后台，在设置中心新增并激活存储桶。
+
+说明：项目不绑定 Vercel，可部署在自建服务器。自建场景推荐继续使用 Upstash/Cloudflare 作为外部 KV；若你有自建 Redis，请提供 REST 网关后通过 `KV_REST_API_URL` / `KV_REST_API_TOKEN` 接入。
 
 ## 环境变量
 
@@ -17,7 +19,7 @@
 
 - 必填：`ADMIN_USER`、`ADMIN_PASS`、`AUTH_SECRET`、`BUCKET_ENCRYPTION_KEY`
 - KV 二选一：
-  - Vercel KV：`KV_REST_API_URL`、`KV_REST_API_TOKEN`
+  - Vercel/Upstash REST：`KV_REST_API_URL`、`KV_REST_API_TOKEN`（或直接用 `UPSTASH_REDIS_REST_URL`、`UPSTASH_REDIS_REST_TOKEN`）
   - Cloudflare KV：`CF_ACCOUNT_ID`、`CF_KV_NAMESPACE_ID`、`CF_API_TOKEN`
 - 可选后备桶：`S3_ENDPOINT`、`S3_REGION`、`S3_BUCKET`、`S3_ACCESS_KEY`、`S3_SECRET_KEY`
 - 可选代理域名白名单：`PROXY_ALLOWED_HOSTS`

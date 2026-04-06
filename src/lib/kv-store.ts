@@ -9,13 +9,31 @@ function getProvider(): KvProvider {
   return VERCEL_PROVIDER;
 }
 
-function getVercelKvConfig() {
-  const url = process.env.KV_REST_API_URL?.trim();
-  const token = process.env.KV_REST_API_TOKEN?.trim();
-  if (!url || !token) {
-    throw new Error('Vercel KV 未配置：请设置 KV_REST_API_URL 与 KV_REST_API_TOKEN');
+function firstDefined(...values: Array<string | undefined>): string | undefined {
+  for (const value of values) {
+    if (value && value.trim()) return value.trim();
   }
-  return { url: url.replace(/\/$/, ''), token };
+  return undefined;
+}
+
+function getVercelKvConfig() {
+  const url = firstDefined(process.env.KV_REST_API_URL, process.env.UPSTASH_REDIS_REST_URL);
+  const writeToken = firstDefined(process.env.KV_REST_API_TOKEN, process.env.UPSTASH_REDIS_REST_TOKEN);
+  const readOnlyToken = firstDefined(process.env.KV_REST_API_READ_ONLY_TOKEN);
+
+  if (!url) {
+    throw new Error('KV REST URL 未配置：请设置 KV_REST_API_URL 或 UPSTASH_REDIS_REST_URL');
+  }
+
+  if (!writeToken && !readOnlyToken) {
+    throw new Error('KV REST Token 未配置：请设置 KV_REST_API_TOKEN 或 UPSTASH_REDIS_REST_TOKEN');
+  }
+
+  return {
+    url: url.replace(/\/$/, ''),
+    writeToken,
+    readToken: readOnlyToken || writeToken || '',
+  };
 }
 
 function getCloudflareKvConfig() {
@@ -31,11 +49,11 @@ function getCloudflareKvConfig() {
 }
 
 async function vercelKvGet(key: string): Promise<string | null> {
-  const { url, token } = getVercelKvConfig();
+  const { url, readToken } = getVercelKvConfig();
   const response = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
     method: 'GET',
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${readToken}`,
     },
     cache: 'no-store',
   });
@@ -49,11 +67,15 @@ async function vercelKvGet(key: string): Promise<string | null> {
 }
 
 async function vercelKvSet(key: string, value: string): Promise<void> {
-  const { url, token } = getVercelKvConfig();
+  const { url, writeToken } = getVercelKvConfig();
+  if (!writeToken) {
+    throw new Error('当前仅配置了只读 Token，无法写入 KV。请设置 KV_REST_API_TOKEN 或 UPSTASH_REDIS_REST_TOKEN');
+  }
+
   const response = await fetch(`${url}/set/${encodeURIComponent(key)}/${encodeURIComponent(value)}`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${writeToken}`,
     },
     cache: 'no-store',
   });
