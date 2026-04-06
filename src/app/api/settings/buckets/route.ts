@@ -5,6 +5,7 @@ import {
   applySaveBucket,
   applySetActiveBucket,
   BucketConfigInput,
+  getEditableBucketById,
   getBucketStateSummary,
   listBucketPublicViews,
   persistBucketState,
@@ -33,7 +34,12 @@ type TestPayload = {
   bucket: BucketConfigInput;
 };
 
-type RequestPayload = SavePayload | RemovePayload | SetActivePayload | TestPayload;
+type GetBucketPayload = {
+  action: 'get-bucket';
+  id: string;
+};
+
+type RequestPayload = SavePayload | RemovePayload | SetActivePayload | TestPayload | GetBucketPayload;
 
 export async function GET(request: Request) {
   const unauthorized = await requireApiAuth(request);
@@ -63,6 +69,17 @@ export async function POST(request: Request) {
       }, { status: tested.ok ? 200 : 400 });
     }
 
+    if (payload.action === 'get-bucket') {
+      if (typeof payload.id !== 'string' || !payload.id.trim()) {
+        return NextResponse.json({ success: false, message: '缺少有效 id' }, { status: 400 });
+      }
+      const bucket = await getEditableBucketById(payload.id.trim(), request);
+      if (!bucket) {
+        return NextResponse.json({ success: false, message: '目标存储桶不存在或不可编辑' }, { status: 404 });
+      }
+      return NextResponse.json({ success: true, data: { bucket } });
+    }
+
     const currentState = await readBucketState(request);
 
     if (payload.action === 'save') {
@@ -70,22 +87,13 @@ export async function POST(request: Request) {
       if (result.error) {
         return NextResponse.json({ success: false, message: result.error }, { status: 400 });
       }
-
+      await persistBucketState(result.state);
       const response = NextResponse.json({
         success: true,
         data: {
-          buckets: result.state.buckets.map((bucket) => ({
-            id: bucket.id,
-            name: bucket.name,
-            endpoint: bucket.endpoint,
-            region: bucket.region,
-            bucket: bucket.bucket,
-            forcePathStyle: bucket.forcePathStyle,
-            active: bucket.id === result.state.activeId,
-          })),
+          buckets: await listBucketPublicViews(request),
         },
       });
-      await persistBucketState(result.state);
       return response;
     }
 
@@ -94,21 +102,13 @@ export async function POST(request: Request) {
         return NextResponse.json({ success: false, message: '缺少有效 id' }, { status: 400 });
       }
       const nextState = applyRemoveBucket(currentState, payload.id.trim());
+      await persistBucketState(nextState);
       const response = NextResponse.json({
         success: true,
         data: {
-          buckets: nextState.buckets.map((bucket) => ({
-            id: bucket.id,
-            name: bucket.name,
-            endpoint: bucket.endpoint,
-            region: bucket.region,
-            bucket: bucket.bucket,
-            forcePathStyle: bucket.forcePathStyle,
-            active: bucket.id === nextState.activeId,
-          })),
+          buckets: await listBucketPublicViews(request),
         },
       });
-      await persistBucketState(nextState);
       return response;
     }
 
@@ -121,22 +121,13 @@ export async function POST(request: Request) {
       if (!nextState) {
         return NextResponse.json({ success: false, message: '目标存储桶不存在' }, { status: 404 });
       }
-
+      await persistBucketState(nextState);
       const response = NextResponse.json({
         success: true,
         data: {
-          buckets: nextState.buckets.map((bucket) => ({
-            id: bucket.id,
-            name: bucket.name,
-            endpoint: bucket.endpoint,
-            region: bucket.region,
-            bucket: bucket.bucket,
-            forcePathStyle: bucket.forcePathStyle,
-            active: bucket.id === nextState.activeId,
-          })),
+          buckets: await listBucketPublicViews(request),
         },
       });
-      await persistBucketState(nextState);
       return response;
     }
 

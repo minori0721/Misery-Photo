@@ -33,21 +33,22 @@ export function useSettings() {
 
   // 初次加载从 localstorage 取数据
   useEffect(() => {
-    setMounted(true);
+    const mountedRaf = window.requestAnimationFrame(() => setMounted(true));
     const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (saved) {
       try {
         const parsed = JSON.parse(saved) as Partial<ISettings>;
         const merged = { ...DEFAULT_SETTINGS, ...parsed } as ISettings;
-        setSettings(merged);
+        window.requestAnimationFrame(() => setSettings(merged));
         syncBucketCacheCookie(merged.bucketRuntimeCache);
-      } catch (e) {
+      } catch {
         console.error('Failed to parse settings');
         syncBucketCacheCookie(DEFAULT_SETTINGS.bucketRuntimeCache);
       }
     } else {
       syncBucketCacheCookie(DEFAULT_SETTINGS.bucketRuntimeCache);
     }
+    return () => window.cancelAnimationFrame(mountedRaf);
   }, []);
 
   const updateSettings = (updates: Partial<ISettings>) => {

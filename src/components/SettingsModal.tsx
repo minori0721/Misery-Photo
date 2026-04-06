@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Settings2, Sparkles, Palette, LayoutGrid, Database, Check, Trash2, PlugZap, Info } from 'lucide-react';
+import { X, Settings2, Sparkles, Palette, LayoutGrid, Database, Check, Trash2, PlugZap, Info, Pencil } from 'lucide-react';
 import { ISettings } from '@/lib/useSettings';
 
 interface Props {
@@ -19,6 +19,8 @@ type BucketView = {
   bucket: string;
   forcePathStyle: boolean;
   active: boolean;
+  source: 'state' | 'env';
+  editable: boolean;
 };
 
 type BucketForm = {
@@ -133,16 +135,72 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
     }
   };
 
+  const testBucketConnectivity = async (form: BucketForm) => {
+    const res = await fetch('/api/settings/buckets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'test',
+        bucket: form,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.message || '连接失败');
+    }
+    return data;
+  };
+
   const handleSaveBucket = async () => {
-    await handleBucketAction(
-      {
-        action: 'save',
-        bucket: bucketForm,
-        setActive: true,
-      },
-      '存储桶已保存并激活'
-    );
-    setBucketForm(EMPTY_BUCKET_FORM);
+    setSavingBucket(true);
+    setBucketError('');
+    setBucketMessage('');
+    try {
+      await testBucketConnectivity(bucketForm);
+      const res = await fetch('/api/settings/buckets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save',
+          bucket: bucketForm,
+          setActive: true,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || '保存失败');
+      }
+      if (Array.isArray(data.data?.buckets)) {
+        setBuckets(data.data.buckets);
+      }
+      setBucketMessage('连接成功，已保存并激活');
+      setBucketForm(EMPTY_BUCKET_FORM);
+      onBucketsChanged?.();
+    } catch (error: any) {
+      setBucketError(error?.message || '连接或保存失败');
+    } finally {
+      setSavingBucket(false);
+    }
+  };
+
+  const handleEditBucket = async (id: string) => {
+    setBucketError('');
+    setBucketMessage('');
+    try {
+      const res = await fetch('/api/settings/buckets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'get-bucket', id }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success || !data.data?.bucket) {
+        throw new Error(data.message || '读取存储桶配置失败');
+      }
+      setBucketForm(data.data.bucket);
+      setBucketMessage('已加载配置，请修改后保存');
+    } catch (error: any) {
+      setBucketError(error?.message || '读取存储桶配置失败');
+    }
   };
 
   const handleSwitchBucket = async (id: string) => {
@@ -349,11 +407,21 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0">
-                            <p className="text-sm font-bold truncate">{bucket.name}</p>
+                            <div className="flex items-center gap-1">
+                              <p className="text-sm font-bold truncate">{bucket.name}</p>
+                              {bucket.source === 'env' && (
+                                <span
+                                  title="这是来自环境变量的默认桶"
+                                  className={`inline-flex items-center ${settings.theme === 'miku' ? 'text-slate-400' : 'text-white/50'}`}
+                                >
+                                  <Info size={12} />
+                                </span>
+                              )}
+                            </div>
                             <p className="text-[11px] opacity-60 truncate">{bucket.bucket} @ {bucket.endpoint}</p>
                           </div>
                           <div className="flex items-center gap-1 shrink-0">
-                            {!bucket.active && (
+                            {!bucket.active && bucket.editable && (
                               <button
                                 onClick={() => handleSwitchBucket(bucket.id)}
                                 disabled={savingBucket}
@@ -367,9 +435,19 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
                                 <Check size={10} /> 当前
                               </span>
                             )}
+                            {bucket.editable && (
+                              <button
+                                onClick={() => handleEditBucket(bucket.id)}
+                                disabled={savingBucket || testingBucket}
+                                className={`p-1.5 rounded-md ${settings.theme === 'miku' ? 'text-slate-500 hover:bg-slate-100' : 'text-white/70 hover:bg-white/10'}`}
+                                title="编辑配置"
+                              >
+                                <Pencil size={12} />
+                              </button>
+                            )}
                             <button
                               onClick={() => handleDeleteBucket(bucket.id)}
-                              disabled={savingBucket}
+                              disabled={savingBucket || !bucket.editable}
                               className={`p-1.5 rounded-md ${settings.theme === 'miku' ? 'text-red-500 hover:bg-red-50' : 'text-red-300 hover:bg-red-500/10'}`}
                               title="删除"
                             >
@@ -442,7 +520,7 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
                     </button>
                     <button
                       onClick={handleSaveBucket}
-                      disabled={savingBucket}
+                      disabled={savingBucket || testingBucket}
                       className={`px-3 py-2 rounded-lg text-xs font-bold ${settings.theme === 'miku' ? 'bg-[#39C5BB] text-white' : 'bg-purple-600 text-white'}`}
                     >
                       {savingBucket ? '保存中...' : '保存并激活'}

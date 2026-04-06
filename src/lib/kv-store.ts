@@ -72,16 +72,24 @@ async function vercelKvSet(key: string, value: string): Promise<void> {
     throw new Error('当前仅配置了只读 Token，无法写入 KV。请设置 KV_REST_API_TOKEN 或 UPSTASH_REDIS_REST_TOKEN');
   }
 
-  const response = await fetch(`${url}/set/${encodeURIComponent(key)}/${encodeURIComponent(value)}`, {
+  const response = await fetch(`${url}/pipeline`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${writeToken}`,
+      'Content-Type': 'application/json',
     },
+    body: JSON.stringify([['SET', key, value]]),
     cache: 'no-store',
   });
 
   if (!response.ok) {
     throw new Error(`Vercel KV 写入失败: HTTP ${response.status}`);
+  }
+
+  const payload = (await response.json()) as Array<{ error?: string }>;
+  const first = Array.isArray(payload) ? payload[0] : undefined;
+  if (first?.error) {
+    throw new Error(`Vercel KV 写入失败: ${first.error}`);
   }
 }
 

@@ -70,6 +70,8 @@ export type BucketPublicView = {
   bucket: string;
   forcePathStyle: boolean;
   active: boolean;
+  source: 'state' | 'env';
+  editable: boolean;
 };
 
 export type BucketRuntime = {
@@ -306,6 +308,25 @@ function getEnvBucketRuntime(): BucketRuntime | null {
   };
 }
 
+function getEnvBucketPublicView(active: boolean): BucketPublicView | null {
+  const endpoint = process.env.S3_ENDPOINT?.trim();
+  const region = process.env.S3_REGION?.trim() || 'auto';
+  const bucket = process.env.S3_BUCKET?.trim();
+  if (!endpoint || !bucket) return null;
+
+  return {
+    id: '__env_default__',
+    name: '默认桶',
+    endpoint,
+    region,
+    bucket,
+    forcePathStyle: true,
+    active,
+    source: 'env',
+    editable: false,
+  };
+}
+
 function getActiveStoredBucket(state: BucketConfigState): StoredBucketConfig | null {
   if (!state.buckets.length) return null;
   const active = state.buckets.find((bucket) => bucket.id === state.activeId);
@@ -342,7 +363,7 @@ export function noBucketConfiguredResponse() {
 
 export async function listBucketPublicViews(request?: Request): Promise<BucketPublicView[]> {
   const state = await readBucketStateFromKv(getOwnerKey(), isBucketRuntimeCacheEnabled(request));
-  return state.buckets.map((bucket) => ({
+  const stateViews = state.buckets.map((bucket) => ({
     id: bucket.id,
     name: bucket.name,
     endpoint: bucket.endpoint,
@@ -350,7 +371,28 @@ export async function listBucketPublicViews(request?: Request): Promise<BucketPu
     bucket: bucket.bucket,
     forcePathStyle: bucket.forcePathStyle,
     active: bucket.id === state.activeId,
+    source: 'state' as const,
+    editable: true,
   }));
+
+  const envView = getEnvBucketPublicView(stateViews.length === 0);
+  return envView ? [envView, ...stateViews] : stateViews;
+}
+
+export async function getEditableBucketById(id: string, request?: Request): Promise<BucketConfigInput | null> {
+  const state = await readBucketStateFromKv(getOwnerKey(), isBucketRuntimeCacheEnabled(request));
+  const bucket = state.buckets.find((item) => item.id === id);
+  if (!bucket) return null;
+  return {
+    id: bucket.id,
+    name: bucket.name,
+    endpoint: bucket.endpoint,
+    region: bucket.region,
+    bucket: bucket.bucket,
+    accessKeyId: bucket.accessKeyId,
+    secretAccessKey: bucket.secretAccessKey,
+    forcePathStyle: bucket.forcePathStyle,
+  };
 }
 
 export function applySaveBucket(state: BucketConfigState, bucketInput: BucketConfigInput, setActive: boolean) {

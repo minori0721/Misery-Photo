@@ -205,6 +205,40 @@ function GalleryContent() {
     if (next) next();
   }, []);
 
+  const signObjectUrlsInPool = useCallback(async (keys: string[], signal?: AbortSignal) => {
+    const chunkSize = 200;
+    const maxParallel = 4;
+    const chunks: string[][] = [];
+    for (let i = 0; i < keys.length; i += chunkSize) {
+      chunks.push(keys.slice(i, i + chunkSize));
+    }
+
+    const signedUrlMap: Record<string, string> = {};
+    let cursor = 0;
+
+    const worker = async () => {
+      while (cursor < chunks.length) {
+        const idx = cursor;
+        cursor += 1;
+        const chunkKeys = chunks[idx];
+        const signJson = await fetchApiJson<any>('/api/gallery', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
+          signal,
+        });
+        if (!signJson.success) {
+          throw new Error(signJson.message || '对象签名失败');
+        }
+        Object.assign(signedUrlMap, signJson.data || {});
+      }
+    };
+
+    const workers = Array.from({ length: Math.min(maxParallel, chunks.length) }, () => worker());
+    await Promise.all(workers);
+    return signedUrlMap;
+  }, [fetchApiJson]);
+
   // 获取文件列表（Signer Mode）：后端仅签名，前端直连 S3 拉 XML 并解析
   const fetchGallery = async (path: string) => {
     const reqId = ++galleryReqIdRef.current;
@@ -243,20 +277,7 @@ function GalleryContent() {
 
       const sortedFileKeys = Array.from(filesMetaMap.keys()).sort((a, b) => naturalSort(a, b));
 
-      const signedUrlMap: Record<string, string> = {};
-      for (let i = 0; i < sortedFileKeys.length; i += 200) {
-        const chunkKeys = sortedFileKeys.slice(i, i + 200);
-        const signJson = await fetchApiJson<any>('/api/gallery', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
-          signal,
-        });
-        if (!signJson.success) {
-          throw new Error(signJson.message || '文件签名失败');
-        }
-        Object.assign(signedUrlMap, signJson.data || {});
-      }
+      const signedUrlMap = await signObjectUrlsInPool(sortedFileKeys, signal);
 
       const files: GalleryFile[] = sortedFileKeys
         .map((key) => {
@@ -486,20 +507,7 @@ function GalleryContent() {
     const uniqKeys = Array.from(new Set(collectedKeys));
     if (uniqKeys.length === 0) return [];
 
-    const signedUrlMap: Record<string, string> = {};
-    for (let i = 0; i < uniqKeys.length; i += 200) {
-      const chunkKeys = uniqKeys.slice(i, i + 200);
-      const signJson = await fetchApiJson<any>('/api/gallery', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
-        signal,
-      });
-      if (!signJson.success) {
-        throw new Error(signJson.message || '下载对象签名失败');
-      }
-      Object.assign(signedUrlMap, signJson.data || {});
-    }
+    const signedUrlMap = await signObjectUrlsInPool(uniqKeys, signal);
 
     return uniqKeys
       .map((key) => {
@@ -514,7 +522,7 @@ function GalleryContent() {
         };
       })
       .filter((f): f is FileToDownload => Boolean(f));
-  }, []);
+  }, [signObjectUrlsInPool]);
 
   // 智能下载：支持子目录结构感知 + 可选只下载选中项
   const handleDownloadZip = async (options?: { files?: GalleryFile[]; folders?: GalleryFolder[]; zipName?: string }) => {
