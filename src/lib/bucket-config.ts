@@ -10,6 +10,7 @@ const MAX_BUCKET_NAME_LENGTH = 64;
 const STATE_KEY_PREFIX = 'nebula:bucket-config:';
 const BUCKET_STATE_CACHE_TTL_MS = 60_000;
 export const BUCKET_RUNTIME_CACHE_COOKIE_NAME = 'nebula_bucket_runtime_cache';
+export const ENV_DEFAULT_BUCKET_ID = '__env_default__';
 
 type BucketStateCacheEntry = {
   state: BucketConfigState;
@@ -172,7 +173,11 @@ function normalizeState(rawState: BucketConfigState): BucketConfigState {
     )
     .filter((b): b is StoredBucketConfig => Boolean(b));
 
-  const activeId = normalized.some((b) => b.id === rawState.activeId) ? rawState.activeId : normalized[0]?.id || null;
+  const activeId = rawState.activeId === ENV_DEFAULT_BUCKET_ID
+    ? ENV_DEFAULT_BUCKET_ID
+    : normalized.some((b) => b.id === rawState.activeId)
+      ? rawState.activeId
+      : normalized[0]?.id || null;
   return { activeId, buckets: normalized };
 }
 
@@ -315,7 +320,7 @@ function getEnvBucketPublicView(active: boolean): BucketPublicView | null {
   if (!endpoint || !bucket) return null;
 
   return {
-    id: '__env_default__',
+    id: ENV_DEFAULT_BUCKET_ID,
     name: '默认桶',
     endpoint,
     region,
@@ -329,6 +334,7 @@ function getEnvBucketPublicView(active: boolean): BucketPublicView | null {
 
 function getActiveStoredBucket(state: BucketConfigState): StoredBucketConfig | null {
   if (!state.buckets.length) return null;
+  if (state.activeId === ENV_DEFAULT_BUCKET_ID) return null;
   const active = state.buckets.find((bucket) => bucket.id === state.activeId);
   return active || state.buckets[0] || null;
 }
@@ -336,6 +342,12 @@ function getActiveStoredBucket(state: BucketConfigState): StoredBucketConfig | n
 export async function getBucketRuntimeFromRequest(request?: Request): Promise<BucketRuntime | null> {
   try {
     const state = await readBucketStateFromKv(getOwnerKey(), isBucketRuntimeCacheEnabled(request));
+
+    if (state.activeId === ENV_DEFAULT_BUCKET_ID) {
+      const envRuntime = getEnvBucketRuntime();
+      if (envRuntime) return envRuntime;
+    }
+
     const active = getActiveStoredBucket(state);
 
     if (active) {
@@ -375,7 +387,8 @@ export async function listBucketPublicViews(request?: Request): Promise<BucketPu
     editable: true,
   }));
 
-  const envView = getEnvBucketPublicView(stateViews.length === 0);
+  const envActive = state.activeId === ENV_DEFAULT_BUCKET_ID || stateViews.length === 0;
+  const envView = getEnvBucketPublicView(envActive);
   return envView ? [envView, ...stateViews] : stateViews;
 }
 
@@ -423,6 +436,9 @@ export function applyRemoveBucket(state: BucketConfigState, id: string) {
 }
 
 export function applySetActiveBucket(state: BucketConfigState, id: string) {
+  if (id === ENV_DEFAULT_BUCKET_ID) {
+    return normalizeState({ buckets: state.buckets, activeId: ENV_DEFAULT_BUCKET_ID });
+  }
   if (!state.buckets.some((bucket) => bucket.id === id)) {
     return null;
   }

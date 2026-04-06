@@ -421,7 +421,7 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
                             <p className="text-[11px] opacity-60 truncate">{bucket.bucket} @ {bucket.endpoint}</p>
                           </div>
                           <div className="flex items-center gap-1 shrink-0">
-                            {!bucket.active && bucket.editable && (
+                            {!bucket.active && (bucket.editable || bucket.source === 'env') && (
                               <button
                                 onClick={() => handleSwitchBucket(bucket.id)}
                                 disabled={savingBucket}
@@ -445,14 +445,16 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
                                 <Pencil size={12} />
                               </button>
                             )}
-                            <button
-                              onClick={() => handleDeleteBucket(bucket.id)}
-                              disabled={savingBucket || !bucket.editable}
-                              className={`p-1.5 rounded-md ${settings.theme === 'miku' ? 'text-red-500 hover:bg-red-50' : 'text-red-300 hover:bg-red-500/10'}`}
-                              title="删除"
-                            >
-                              <Trash2 size={12} />
-                            </button>
+                            {bucket.editable && (
+                              <button
+                                onClick={() => handleDeleteBucket(bucket.id)}
+                                disabled={savingBucket}
+                                className={`p-1.5 rounded-md ${settings.theme === 'miku' ? 'text-red-500 hover:bg-red-50' : 'text-red-300 hover:bg-red-500/10'}`}
+                                title="删除"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            )}
                           </div>
                         </div>
                       </div>
