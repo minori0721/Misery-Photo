@@ -3,10 +3,21 @@ import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { NextResponse } from 'next/server';
 import { kvGetString, kvSetString } from '@/lib/kv-store';
 import { decryptSecret, encryptSecret } from '@/lib/secret-crypto';
+import { readCookieFromHeader } from '@/lib/auth';
 
 const MAX_BUCKETS = 5;
 const MAX_BUCKET_NAME_LENGTH = 64;
 const STATE_KEY_PREFIX = 'nebula:bucket-config:';
+const BUCKET_STATE_CACHE_TTL_MS = 60_000;
+export const BUCKET_RUNTIME_CACHE_COOKIE_NAME = 'nebula_bucket_runtime_cache';
+
+type BucketStateCacheEntry = {
+  state: BucketConfigState;
+  expiresAt: number;
+};
+
+const stateCache = new Map<string, BucketStateCacheEntry>();
+const stateReadInFlight = new Map<string, Promise<BucketConfigState>>();
 
 export type BucketConfigInput = {
   id?: string;
@@ -75,6 +86,35 @@ function getOwnerKey(): string {
 
 function stateKeyForOwner(owner: string): string {
   return `${STATE_KEY_PREFIX}${owner}`;
+}
+
+function isBucketRuntimeCacheEnabled(request?: Request): boolean {
+  if (!request) return true;
+  const flag = readCookieFromHeader(request.headers.get('cookie'), BUCKET_RUNTIME_CACHE_COOKIE_NAME);
+  if (typeof flag === 'undefined') return true;
+  return flag !== '0';
+}
+
+function getCachedState(owner: string): BucketConfigState | null {
+  const entry = stateCache.get(owner);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    stateCache.delete(owner);
+    return null;
+  }
+  return entry.state;
+}
+
+function setCachedState(owner: string, state: BucketConfigState) {
+  stateCache.set(owner, {
+    state,
+    expiresAt: Date.now() + BUCKET_STATE_CACHE_TTL_MS,
+  });
+}
+
+function invalidateStateCache(owner: string) {
+  stateCache.delete(owner);
+  stateReadInFlight.delete(owner);
 }
 
 function safeJsonParse<T>(value: string, fallback: T): T {
@@ -181,17 +221,41 @@ function fromPersistedState(persisted: PersistedBucketConfigState): BucketConfig
   });
 }
 
-async function readBucketStateFromKv(owner = getOwnerKey()): Promise<BucketConfigState> {
-  const raw = await kvGetString(stateKeyForOwner(owner));
-  if (!raw) return { activeId: null, buckets: [] };
+async function readBucketStateFromKv(owner = getOwnerKey(), useCache = true): Promise<BucketConfigState> {
+  if (useCache) {
+    const cached = getCachedState(owner);
+    if (cached) return cached;
 
-  const persisted = safeJsonParse<PersistedBucketConfigState>(raw, { activeId: null, buckets: [] });
-  return fromPersistedState(persisted);
+    const inFlight = stateReadInFlight.get(owner);
+    if (inFlight) return inFlight;
+  }
+
+  const loadPromise = (async () => {
+    const raw = await kvGetString(stateKeyForOwner(owner));
+    const state = raw
+      ? fromPersistedState(safeJsonParse<PersistedBucketConfigState>(raw, { activeId: null, buckets: [] }))
+      : { activeId: null, buckets: [] };
+
+    if (useCache) {
+      setCachedState(owner, state);
+    }
+    return state;
+  })();
+
+  if (!useCache) return loadPromise;
+
+  stateReadInFlight.set(owner, loadPromise);
+  return loadPromise.finally(() => {
+    if (stateReadInFlight.get(owner) === loadPromise) {
+      stateReadInFlight.delete(owner);
+    }
+  });
 }
 
 async function writeBucketStateToKv(state: BucketConfigState, owner = getOwnerKey()): Promise<void> {
   const payload = JSON.stringify(toPersistedState(state));
   await kvSetString(stateKeyForOwner(owner), payload);
+  setCachedState(owner, normalizeState(state));
 }
 
 function buildS3ClientFromStored(config: StoredBucketConfig): S3Client {
@@ -248,9 +312,9 @@ function getActiveStoredBucket(state: BucketConfigState): StoredBucketConfig | n
   return active || state.buckets[0] || null;
 }
 
-export async function getBucketRuntimeFromRequest(): Promise<BucketRuntime | null> {
+export async function getBucketRuntimeFromRequest(request?: Request): Promise<BucketRuntime | null> {
   try {
-    const state = await readBucketStateFromKv();
+    const state = await readBucketStateFromKv(getOwnerKey(), isBucketRuntimeCacheEnabled(request));
     const active = getActiveStoredBucket(state);
 
     if (active) {
@@ -276,8 +340,8 @@ export function noBucketConfiguredResponse() {
   );
 }
 
-export async function listBucketPublicViews(): Promise<BucketPublicView[]> {
-  const state = await readBucketStateFromKv();
+export async function listBucketPublicViews(request?: Request): Promise<BucketPublicView[]> {
+  const state = await readBucketStateFromKv(getOwnerKey(), isBucketRuntimeCacheEnabled(request));
   return state.buckets.map((bucket) => ({
     id: bucket.id,
     name: bucket.name,
@@ -324,11 +388,12 @@ export function applySetActiveBucket(state: BucketConfigState, id: string) {
 }
 
 export async function persistBucketState(state: BucketConfigState) {
+  invalidateStateCache(getOwnerKey());
   await writeBucketStateToKv(state);
 }
 
-export async function readBucketState() {
-  return readBucketStateFromKv();
+export async function readBucketState(request?: Request) {
+  return readBucketStateFromKv(getOwnerKey(), isBucketRuntimeCacheEnabled(request));
 }
 
 export function clearLegacyBucketStateCookie(response: NextResponse) {
@@ -361,8 +426,8 @@ export async function testBucketConnectivity(bucketInput: BucketConfigInput) {
   }
 }
 
-export async function getBucketStateSummary() {
-  const runtime = await getBucketRuntimeFromRequest();
+export async function getBucketStateSummary(request?: Request) {
+  const runtime = await getBucketRuntimeFromRequest(request);
   return {
     hasActiveBucket: Boolean(runtime),
     source: runtime?.source || null,

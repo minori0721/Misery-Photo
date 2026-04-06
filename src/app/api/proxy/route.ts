@@ -31,7 +31,7 @@ export async function GET(request: Request) {
     const unauthorized = await requireApiAuth(request);
     if (unauthorized) return unauthorized;
 
-    const runtime = await getBucketRuntimeFromRequest();
+    const runtime = await getBucketRuntimeFromRequest(request);
     if (!runtime) return noBucketConfiguredResponse();
 
     const { searchParams } = new URL(request.url);

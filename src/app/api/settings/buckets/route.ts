@@ -42,8 +42,8 @@ export async function GET(request: Request) {
   return NextResponse.json({
     success: true,
     data: {
-      buckets: await listBucketPublicViews(),
-      runtime: await getBucketStateSummary(),
+      buckets: await listBucketPublicViews(request),
+      runtime: await getBucketStateSummary(request),
     },
   });
 }
@@ -63,7 +63,7 @@ export async function POST(request: Request) {
       }, { status: tested.ok ? 200 : 400 });
     }
 
-    const currentState = await readBucketState();
+    const currentState = await readBucketState(request);
 
     if (payload.action === 'save') {
       const result = applySaveBucket(currentState, payload.bucket, Boolean(payload.setActive));

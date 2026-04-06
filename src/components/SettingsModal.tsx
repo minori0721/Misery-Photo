@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Settings2, Sparkles, Palette, LayoutGrid, Database, Check, Trash2, PlugZap } from 'lucide-react';
+import { X, Settings2, Sparkles, Palette, LayoutGrid, Database, Check, Trash2, PlugZap, Info } from 'lucide-react';
 import { ISettings } from '@/lib/useSettings';
 
 interface Props {
@@ -282,6 +282,37 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
                     2 列展示
                   </button>
                 </div>
+              </div>
+
+              {/* Runtime Cache Toggle */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <Database size={14} className={settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-blue-400'} />
+                    <h3 className="text-xs font-bold uppercase tracking-wider opacity-60">桶配置性能缓存</h3>
+                    <span
+                      title="开启后服务端会在内存中缓存桶配置 60 秒，减少每次请求读取 KV 的延迟。关闭后每次都直读 KV。"
+                      className={`inline-flex items-center ${settings.theme === 'miku' ? 'text-slate-400' : 'text-white/40'}`}
+                    >
+                      <Info size={12} />
+                    </span>
+                  </div>
+                  <p className="text-[10px] opacity-40 mt-1">默认开启，TTL = 60s。修改后立即生效。</p>
+                </div>
+                <button
+                  onClick={() => updateSettings({ bucketRuntimeCache: !settings.bucketRuntimeCache })}
+                  className={`w-12 h-6 rounded-full transition-colors relative flex items-center px-1 ${
+                    settings.bucketRuntimeCache
+                      ? (settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-blue-600')
+                      : (settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10')
+                  }`}
+                >
+                  <motion.div
+                    layout
+                    className="w-4 h-4 rounded-full shadow-md bg-white"
+                    style={{ marginLeft: settings.bucketRuntimeCache ? 'auto' : '0' }}
+                  />
+                </button>
               </div>
 
               {/* Bucket Manager */}

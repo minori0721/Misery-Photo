@@ -12,7 +12,7 @@ export async function GET(request: Request) {
     const unauthorized = await requireApiAuth(request);
     if (unauthorized) return unauthorized;
 
-    const runtime = await getBucketRuntimeFromRequest();
+    const runtime = await getBucketRuntimeFromRequest(request);
     if (!runtime) return noBucketConfiguredResponse();
 
     const s3Client = runtime.client;
@@ -145,7 +145,7 @@ export async function POST(request: Request) {
     const unauthorized = await requireApiAuth(request);
     if (unauthorized) return unauthorized;
 
-    const runtime = await getBucketRuntimeFromRequest();
+    const runtime = await getBucketRuntimeFromRequest(request);
     if (!runtime) return noBucketConfiguredResponse();
 
     const s3Client = runtime.client;
