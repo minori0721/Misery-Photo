@@ -1,6 +1,6 @@
 # 完整部署文档
 
-本文档覆盖从零开始部署 Misery Photo 1.0.0，包括：
+本文档覆盖从零开始部署 Misery Photo，包括：
 
 - 选择并创建 KV（Vercel + Upstash Redis 或 Cloudflare KV）
 - 配置环境变量
@@ -12,22 +12,21 @@
 你需要准备：
 
 1. 一个代码仓库（GitHub）
-2. 一个 Vercel 账号
+2. 一个KV空间（本文可教你准备，如果没有的话就需要将s3的参数填写进环境变量，且只能绑定一个桶）
 3. 一套 S3 兼容存储参数（endpoint、bucket、access key、secret key）
 4. 一组强随机字符串：
-   - `AUTH_SECRET`（建议 32 位）
-   - `BUCKET_ENCRYPTION_KEY`（建议 32 位）
+   - `AUTH_SECRET`（建议 32 位，随便打）
+   - `BUCKET_ENCRYPTION_KEY`（建议 32 位，随便打）
 
 ## 2. 关键架构说明
 
-1. 登录账号：仍使用环境变量 `ADMIN_USER` 和 `ADMIN_PASS`。
-2. 存储桶配置：持久化到 KV，不再放浏览器 Cookie。
+1. 登录账号：使用环境变量 `ADMIN_USER` 和 `ADMIN_PASS`。
+2. 存储桶配置：持久化到 KV。
 3. 密钥安全：`accessKeyId` 和 `secretAccessKey` 都会在服务端加密后写入 KV。
-4. 本版本不做旧 Cookie 自动迁移：升级后请手动在设置中心重新添加存储桶。
 
-## 3. 创建 KV（方案 A：Vercel + Upstash Redis）
+## 3. 创建 KV（方案 A：Vercel + Upstash Redis）（推荐）
 
-很多 Vercel 账号在 Storage 页面不再直接显示 KV，而是显示 Upstash。此时按下面步骤即可。
+ Vercel 账号在 Storage 页面不再直接显示 KV，而是显示 Upstash。此时按下面步骤即可。
 
 1. 打开 Vercel 控制台。
 2. 进入 Storage 页面，点击 Create Database。
@@ -65,17 +64,18 @@
 至少设置以下变量：
 
 ```env
-ADMIN_USER=admin
-ADMIN_PASS=your_password
-AUTH_SECRET=your_32_chars_random_secret
-BUCKET_ENCRYPTION_KEY=your_32_chars_random_key
+ADMIN_USER=用户名
+ADMIN_PASS=密码
+AUTH_SECRET=一组强随机字符串
+BUCKET_ENCRYPTION_KEY=一组强随机字符串
 
 BUCKET_STORE_PROVIDER=vercel
+
+#如果用vercel部署，并将Upstash Redis并绑定到了你在vercel上的本项目，下面的都可以不写！
+
 KV_REST_API_URL=... # 可选，未配置时自动读取 UPSTASH_REDIS_REST_URL
 KV_REST_API_TOKEN=... # 可选，未配置时自动读取 UPSTASH_REDIS_REST_TOKEN
 KV_REST_API_READ_ONLY_TOKEN=... # 可选，仅用于读
-UPSTASH_REDIS_REST_URL=...
-UPSTASH_REDIS_REST_TOKEN=...
 
 # 或使用 Cloudflare KV：
 # BUCKET_STORE_PROVIDER=cloudflare
@@ -83,7 +83,7 @@ UPSTASH_REDIS_REST_TOKEN=...
 # CF_KV_NAMESPACE_ID=...
 # CF_API_TOKEN=...
 
-# 可选后备桶（KV 无桶时可作为兜底）
+# 可选后备桶（无KV 时可作为兜底）
 S3_ENDPOINT=
 S3_REGION=auto
 S3_BUCKET=
@@ -95,14 +95,14 @@ PROXY_ALLOWED_HOSTS=
 
 注意：
 
-1. `AUTH_SECRET` 与 `BUCKET_ENCRYPTION_KEY` 不要复用，不要太短。
+1. `AUTH_SECRET` 与 `BUCKET_ENCRYPTION_KEY` 最好不要复用，不要太短。
 2. 生产环境必须使用 HTTPS（Vercel 默认满足）。
 3. 如果换了加密密钥，旧桶密文会无法解密。
 
 ## 6. 部署流程
 
-1. 在仓库推送代码到目标分支（例如 `dev`）。
-2. 在 Vercel 中选择该分支部署。
+1. fork本仓库。
+2. 在 Vercel 或者别的serverless部署服务中选择该项目部署，注意填入环境变量。
 3. 等待构建完成。
 4. 打开站点，访问登录页。
 5. 使用 `ADMIN_USER` / `ADMIN_PASS` 登录。
@@ -173,15 +173,9 @@ PROXY_ALLOWED_HOSTS=
 2. KV 变量没配置到当前环境（仅配置了其中一个环境）
 3. 修改了 `BUCKET_ENCRYPTION_KEY`，导致旧数据不可解密
 
-## 9. 回滚建议
 
-若 1.0.0 发布后出现问题：
 
-1. 先在 Vercel 回滚到上一稳定部署
-2. 保留当前 KV 数据，不要先删除
-3. 修复后再重新部署
-
-## 10. 安全建议
+## 9. 安全建议
 
 1. 定期轮换 `ADMIN_PASS`、`AUTH_SECRET`、`BUCKET_ENCRYPTION_KEY`
 2. 给 Cloudflare Token 最小权限
