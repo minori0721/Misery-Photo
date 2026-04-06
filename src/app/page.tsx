@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Folder,
   Image as ImageIcon,
+  ChevronLeft,
   ChevronRight,
   Upload,
   Download,
@@ -124,7 +125,10 @@ function GalleryContent() {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [noBucketConfigured, setNoBucketConfigured] = useState(false);
+  const [bucketRefreshTick, setBucketRefreshTick] = useState(0);
   const [activeAbortController, setActiveAbortController] = useState<AbortController | null>(null);
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
   const toastIdRef = useRef(0);
   const galleryReqIdRef = useRef(0);
@@ -164,7 +168,9 @@ function GalleryContent() {
     }
 
     if (!res.ok) {
-      throw new Error(payload?.message || `请求失败（${res.status}）`);
+      const err = new Error(payload?.message || `请求失败（${res.status}）`) as Error & { code?: string };
+      err.code = payload?.code;
+      throw err;
     }
 
     return payload as T;
@@ -199,6 +205,40 @@ function GalleryContent() {
     if (next) next();
   }, []);
 
+  const signObjectUrlsInPool = useCallback(async (keys: string[], signal?: AbortSignal) => {
+    const chunkSize = 200;
+    const maxParallel = 4;
+    const chunks: string[][] = [];
+    for (let i = 0; i < keys.length; i += chunkSize) {
+      chunks.push(keys.slice(i, i + chunkSize));
+    }
+
+    const signedUrlMap: Record<string, string> = {};
+    let cursor = 0;
+
+    const worker = async () => {
+      while (cursor < chunks.length) {
+        const idx = cursor;
+        cursor += 1;
+        const chunkKeys = chunks[idx];
+        const signJson = await fetchApiJson<any>('/api/gallery', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
+          signal,
+        });
+        if (!signJson.success) {
+          throw new Error(signJson.message || '对象签名失败');
+        }
+        Object.assign(signedUrlMap, signJson.data || {});
+      }
+    };
+
+    const workers = Array.from({ length: Math.min(maxParallel, chunks.length) }, () => worker());
+    await Promise.all(workers);
+    return signedUrlMap;
+  }, [fetchApiJson]);
+
   // 获取文件列表（Signer Mode）：后端仅签名，前端直连 S3 拉 XML 并解析
   const fetchGallery = async (path: string) => {
     const reqId = ++galleryReqIdRef.current;
@@ -209,6 +249,7 @@ function GalleryContent() {
 
     setLoading(true);
     setError('');
+    setNoBucketConfigured(false);
     try {
       const foldersMap = new Map<string, GalleryFolder>();
       const filesMetaMap = new Map<string, { key: string; size: number; lastModified: string }>();
@@ -236,20 +277,7 @@ function GalleryContent() {
 
       const sortedFileKeys = Array.from(filesMetaMap.keys()).sort((a, b) => naturalSort(a, b));
 
-      const signedUrlMap: Record<string, string> = {};
-      for (let i = 0; i < sortedFileKeys.length; i += 200) {
-        const chunkKeys = sortedFileKeys.slice(i, i + 200);
-        const signJson = await fetchApiJson<any>('/api/gallery', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
-          signal,
-        });
-        if (!signJson.success) {
-          throw new Error(signJson.message || '文件签名失败');
-        }
-        Object.assign(signedUrlMap, signJson.data || {});
-      }
+      const signedUrlMap = await signObjectUrlsInPool(sortedFileKeys, signal);
 
       const files: GalleryFile[] = sortedFileKeys
         .map((key) => {
@@ -273,6 +301,15 @@ function GalleryContent() {
       }
     } catch (err: unknown) {
       if ((err as { name?: string })?.name === 'AbortError') {
+        return;
+      }
+      const errCode = (err as { code?: string })?.code;
+      if (errCode === 'NO_BUCKET_CONFIG') {
+        if (reqId === galleryReqIdRef.current) {
+          setNoBucketConfigured(true);
+          setData({ folders: [], files: [], currentPath: path });
+          setError('');
+        }
         return;
       }
       const msg = err instanceof Error ? err.message : '获取数据失败';
@@ -334,7 +371,7 @@ function GalleryContent() {
   useEffect(() => {
     fetchGallery(currentPath);
     setViewMode(currentPath ? 'manga' : 'grid');
-  }, [currentPath]);
+  }, [currentPath, bucketRefreshTick]);
 
   useEffect(() => {
     return () => {
@@ -350,6 +387,46 @@ function GalleryContent() {
       }
     };
   }, [activeAbortController]);
+
+  const closeLightbox = useCallback(() => {
+    setLightboxIndex(null);
+  }, []);
+
+  const openLightboxByPath = useCallback((path: string) => {
+    const index = data.files.findIndex((file) => file.path === path);
+    if (index >= 0) {
+      setLightboxIndex(index);
+    }
+  }, [data.files]);
+
+  const showPrevLightbox = useCallback(() => {
+    if (!data.files.length) return;
+    setLightboxIndex((prev) => {
+      if (prev === null) return 0;
+      return (prev - 1 + data.files.length) % data.files.length;
+    });
+  }, [data.files.length]);
+
+  const showNextLightbox = useCallback(() => {
+    if (!data.files.length) return;
+    setLightboxIndex((prev) => {
+      if (prev === null) return 0;
+      return (prev + 1) % data.files.length;
+    });
+  }, [data.files.length]);
+
+  useEffect(() => {
+    if (lightboxIndex === null) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeLightbox();
+      if (e.key === 'ArrowLeft') showPrevLightbox();
+      if (e.key === 'ArrowRight') showNextLightbox();
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [lightboxIndex, closeLightbox, showPrevLightbox, showNextLightbox]);
 
   // 处理文件夹点击
   const handleFolderClick = (folderPath: string) => {
@@ -430,20 +507,7 @@ function GalleryContent() {
     const uniqKeys = Array.from(new Set(collectedKeys));
     if (uniqKeys.length === 0) return [];
 
-    const signedUrlMap: Record<string, string> = {};
-    for (let i = 0; i < uniqKeys.length; i += 200) {
-      const chunkKeys = uniqKeys.slice(i, i + 200);
-      const signJson = await fetchApiJson<any>('/api/gallery', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
-        signal,
-      });
-      if (!signJson.success) {
-        throw new Error(signJson.message || '下载对象签名失败');
-      }
-      Object.assign(signedUrlMap, signJson.data || {});
-    }
+    const signedUrlMap = await signObjectUrlsInPool(uniqKeys, signal);
 
     return uniqKeys
       .map((key) => {
@@ -458,7 +522,7 @@ function GalleryContent() {
         };
       })
       .filter((f): f is FileToDownload => Boolean(f));
-  }, []);
+  }, [signObjectUrlsInPool]);
 
   // 智能下载：支持子目录结构感知 + 可选只下载选中项
   const handleDownloadZip = async (options?: { files?: GalleryFile[]; folders?: GalleryFolder[]; zipName?: string }) => {
@@ -639,6 +703,7 @@ function GalleryContent() {
   if (!mounted) return null;
 
   const allKeys = [...data.folders.map((f: any) => f.path), ...data.files.map((f: any) => f.path)];
+  const activeLightboxFile = lightboxIndex !== null ? data.files[lightboxIndex] : null;
 
   return (
     <div className={`min-h-screen selection:bg-purple-500/30 transition-colors duration-1000 ${settings.theme === 'miku'
@@ -673,6 +738,7 @@ function GalleryContent() {
         onClose={() => setIsSettingsOpen(false)}
         settings={settings}
         updateSettings={updateSettings}
+        onBucketsChanged={() => setBucketRefreshTick((v) => v + 1)}
       />
 
       <UploadModal
@@ -752,6 +818,63 @@ function GalleryContent() {
           >
             <ArrowUp size={20} />
           </motion.button>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {activeLightboxFile && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[180] bg-black/90 backdrop-blur-md"
+            onClick={closeLightbox}
+          >
+            <button
+              onClick={(e) => { e.stopPropagation(); closeLightbox(); }}
+              className="absolute top-5 right-5 z-[182] p-2 rounded-xl bg-white/10 text-white hover:bg-white/20 transition-colors"
+              aria-label="关闭预览"
+            >
+              <XIcon size={20} />
+            </button>
+
+            {data.files.length > 1 && (
+              <>
+                <button
+                  onClick={(e) => { e.stopPropagation(); showPrevLightbox(); }}
+                  className="absolute left-4 top-1/2 -translate-y-1/2 z-[182] p-3 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"
+                  aria-label="上一张"
+                >
+                  <ChevronLeft size={24} />
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); showNextLightbox(); }}
+                  className="absolute right-4 top-1/2 -translate-y-1/2 z-[182] p-3 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"
+                  aria-label="下一张"
+                >
+                  <ChevronRight size={24} />
+                </button>
+              </>
+            )}
+
+            <div className="absolute inset-0 p-4 md:p-10 flex items-center justify-center" onClick={closeLightbox}>
+              <motion.img
+                key={activeLightboxFile.path}
+                src={activeLightboxFile.url}
+                alt={activeLightboxFile.name}
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.98 }}
+                transition={{ duration: 0.18 }}
+                className="max-w-full max-h-full object-contain rounded-xl shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              />
+            </div>
+
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-[182] px-4 py-2 rounded-xl bg-black/50 border border-white/10 text-white text-xs font-bold max-w-[90vw] truncate">
+              {activeLightboxFile.name}
+            </div>
+          </motion.div>
         )}
       </AnimatePresence>
 
@@ -847,6 +970,22 @@ function GalleryContent() {
             <Loader2 className={`w-10 h-10 animate-spin mb-4 ${settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-purple-600'}`} />
             <p className={`text-xs font-black uppercase tracking-[4px] ${settings.theme === 'miku' ? 'text-slate-400' : 'text-white/20'}`}>正在同步云端数据...</p>
           </div>
+        ) : noBucketConfigured ? (
+          <div className={`max-w-2xl mx-auto mt-14 p-8 rounded-3xl border text-center ${settings.theme === 'miku' ? 'bg-white border-[#39C5BB]/20' : 'bg-white/5 border-white/10'}`}>
+            <div className={`w-16 h-16 mx-auto rounded-2xl flex items-center justify-center mb-5 ${settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-purple-500/10 text-purple-400'}`}>
+              <HardDrive size={28} />
+            </div>
+            <h2 className="text-xl font-black tracking-wider mb-2">暂无可用存储桶</h2>
+            <p className={`text-sm mb-6 ${settings.theme === 'miku' ? 'text-slate-500' : 'text-white/60'}`}>
+              登录成功，但当前没有可用桶配置。请前往设置添加并激活一个存储桶。
+            </p>
+            <button
+              onClick={() => setIsSettingsOpen(true)}
+              className={`px-6 py-3 rounded-xl text-sm font-black uppercase tracking-widest ${settings.theme === 'miku' ? 'bg-[#39C5BB] text-white' : 'bg-purple-600 text-white'}`}
+            >
+              打开设置
+            </button>
+          </div>
         ) : (
           <motion.div
             variants={containerVariants}
@@ -894,7 +1033,15 @@ function GalleryContent() {
                   key={file.path}
                   variants={itemVariants}
                   layout
-                  onClick={() => { if (selectionMode) toggleSelection(file.path); }}
+                  onClick={() => {
+                    if (selectionMode) {
+                      toggleSelection(file.path);
+                      return;
+                    }
+                    if (viewMode === 'grid') {
+                      openLightboxByPath(file.path);
+                    }
+                  }}
                   className={viewMode === 'grid' ?
                     `group relative rounded-3xl overflow-hidden transition-all duration-500 border aspect-[3/4] ${selectionMode && selectedItems.has(file.path)
                       ? (settings.theme === 'miku' ? 'border-[#39C5BB] shadow-[0_0_0_3px_rgba(57,197,187,0.3)] bg-white' : 'border-purple-500 shadow-[0_0_0_3px_rgba(168,85,247,0.3)] bg-[#090909]')
@@ -924,7 +1071,7 @@ function GalleryContent() {
                       alt={file.name}
                       loading="lazy"
                       className={viewMode === 'grid'
-                        ? "w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium relative z-10"
+                        ? "w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium relative z-10 cursor-zoom-in"
                         : "w-full h-auto select-none relative z-10"}
                       onLoad={(e) => {
                         const target = e.target as HTMLImageElement;
@@ -938,11 +1085,11 @@ function GalleryContent() {
                     {viewMode === 'grid' && (
                       <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-all flex flex-col justify-between p-4 z-20">
                         <div className="flex justify-end">
-                          <button onClick={() => handleDelete(file.path, 'image')} className="p-2 bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-all shadow-xl">
+                          <button onClick={(e) => { e.stopPropagation(); handleDelete(file.path, 'image'); }} className="p-2 bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-all shadow-xl">
                             <Trash2 size={16} />
                           </button>
                         </div>
-                        <a href={file.url} download={file.name} className="w-full py-2 bg-white text-black rounded-xl text-[10px] font-black uppercase tracking-widest text-center">下载原图</a>
+                        <a onClick={(e) => e.stopPropagation()} href={file.url} download={file.name} className="w-full py-2 bg-white text-black rounded-xl text-[10px] font-black uppercase tracking-widest text-center">下载原图</a>
                       </div>
                     )}
 

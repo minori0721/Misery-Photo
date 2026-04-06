@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { X, Folder, Loader2, ArrowRight } from 'lucide-react';
 import { ISettings } from '@/lib/useSettings';
 
@@ -33,8 +33,7 @@ export default function TargetPickerModal({
 
   useEffect(() => {
     if (!isOpen) return;
-    setSelected('');
-    setLoading(true);
+    Promise.resolve().then(() => setLoading(true));
     fetch('/api/gallery?path=&json=1&foldersOnly=1')
       .then(async (r) => {
         const data = await r.json();
@@ -132,7 +131,7 @@ export default function TargetPickerModal({
         {/* Confirm */}
         <div className={`px-4 py-4 border-t ${isMiku ? 'border-[#39C5BB]/10' : 'border-white/5'}`}>
           <button
-            disabled={selected === '' && selected !== ''}  // allow root ('')
+            disabled={loading}
             onClick={() => {
               onConfirm(selected);
               onClose();

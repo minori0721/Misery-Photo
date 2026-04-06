@@ -1,13 +1,19 @@
 import { NextResponse } from 'next/server';
 import { DeleteObjectCommand, DeleteObjectsCommand, ListObjectsV2Command, ListObjectsV2CommandOutput } from '@aws-sdk/client-s3';
-import { s3Client, BUCKET_NAME } from '@/lib/s3';
 import { requireApiAuth } from '@/lib/auth';
 import { isValidStoragePath, toFolderPath } from '@/lib/validation';
+import { getBucketRuntimeFromRequest, noBucketConfiguredResponse } from '@/lib/bucket-config';
 
 export async function POST(request: Request) {
   try {
     const unauthorized = await requireApiAuth(request);
     if (unauthorized) return unauthorized;
+
+    const runtime = await getBucketRuntimeFromRequest(request);
+    if (!runtime) return noBucketConfiguredResponse();
+
+    const s3Client = runtime.client;
+    const bucketName = runtime.bucketName;
 
     const { path, type } = await request.json(); // type: 'image' | 'folder'
 
@@ -22,7 +28,7 @@ export async function POST(request: Request) {
     if (type === 'image') {
       // 删除单图
       const command = new DeleteObjectCommand({
-        Bucket: BUCKET_NAME,
+        Bucket: bucketName,
         Key: path,
       });
       await s3Client.send(command);
@@ -32,7 +38,7 @@ export async function POST(request: Request) {
       let continuationToken: string | undefined = undefined;
       do {
         const listCommand = new ListObjectsV2Command({
-          Bucket: BUCKET_NAME,
+          Bucket: bucketName,
           Prefix: folderPath,
           ContinuationToken: continuationToken,
         });
@@ -40,7 +46,7 @@ export async function POST(request: Request) {
         const listResponse: ListObjectsV2CommandOutput = await s3Client.send(listCommand);
         if (listResponse.Contents && listResponse.Contents.length > 0) {
           const deleteCommand = new DeleteObjectsCommand({
-            Bucket: BUCKET_NAME,
+            Bucket: bucketName,
             Delete: {
               Objects: listResponse.Contents.map((item) => ({ Key: item.Key! })),
               Quiet: true,
