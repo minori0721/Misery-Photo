@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Folder,
   Image as ImageIcon,
+  ChevronLeft,
   ChevronRight,
   Upload,
   Download,
@@ -127,6 +128,7 @@ function GalleryContent() {
   const [noBucketConfigured, setNoBucketConfigured] = useState(false);
   const [bucketRefreshTick, setBucketRefreshTick] = useState(0);
   const [activeAbortController, setActiveAbortController] = useState<AbortController | null>(null);
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
   const toastIdRef = useRef(0);
   const galleryReqIdRef = useRef(0);
@@ -364,6 +366,46 @@ function GalleryContent() {
       }
     };
   }, [activeAbortController]);
+
+  const closeLightbox = useCallback(() => {
+    setLightboxIndex(null);
+  }, []);
+
+  const openLightboxByPath = useCallback((path: string) => {
+    const index = data.files.findIndex((file) => file.path === path);
+    if (index >= 0) {
+      setLightboxIndex(index);
+    }
+  }, [data.files]);
+
+  const showPrevLightbox = useCallback(() => {
+    if (!data.files.length) return;
+    setLightboxIndex((prev) => {
+      if (prev === null) return 0;
+      return (prev - 1 + data.files.length) % data.files.length;
+    });
+  }, [data.files.length]);
+
+  const showNextLightbox = useCallback(() => {
+    if (!data.files.length) return;
+    setLightboxIndex((prev) => {
+      if (prev === null) return 0;
+      return (prev + 1) % data.files.length;
+    });
+  }, [data.files.length]);
+
+  useEffect(() => {
+    if (lightboxIndex === null) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeLightbox();
+      if (e.key === 'ArrowLeft') showPrevLightbox();
+      if (e.key === 'ArrowRight') showNextLightbox();
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [lightboxIndex, closeLightbox, showPrevLightbox, showNextLightbox]);
 
   // 处理文件夹点击
   const handleFolderClick = (folderPath: string) => {
@@ -653,6 +695,7 @@ function GalleryContent() {
   if (!mounted) return null;
 
   const allKeys = [...data.folders.map((f: any) => f.path), ...data.files.map((f: any) => f.path)];
+  const activeLightboxFile = lightboxIndex !== null ? data.files[lightboxIndex] : null;
 
   return (
     <div className={`min-h-screen selection:bg-purple-500/30 transition-colors duration-1000 ${settings.theme === 'miku'
@@ -767,6 +810,63 @@ function GalleryContent() {
           >
             <ArrowUp size={20} />
           </motion.button>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {activeLightboxFile && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[180] bg-black/90 backdrop-blur-md"
+            onClick={closeLightbox}
+          >
+            <button
+              onClick={(e) => { e.stopPropagation(); closeLightbox(); }}
+              className="absolute top-5 right-5 z-[182] p-2 rounded-xl bg-white/10 text-white hover:bg-white/20 transition-colors"
+              aria-label="关闭预览"
+            >
+              <XIcon size={20} />
+            </button>
+
+            {data.files.length > 1 && (
+              <>
+                <button
+                  onClick={(e) => { e.stopPropagation(); showPrevLightbox(); }}
+                  className="absolute left-4 top-1/2 -translate-y-1/2 z-[182] p-3 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"
+                  aria-label="上一张"
+                >
+                  <ChevronLeft size={24} />
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); showNextLightbox(); }}
+                  className="absolute right-4 top-1/2 -translate-y-1/2 z-[182] p-3 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"
+                  aria-label="下一张"
+                >
+                  <ChevronRight size={24} />
+                </button>
+              </>
+            )}
+
+            <div className="absolute inset-0 p-4 md:p-10 flex items-center justify-center" onClick={closeLightbox}>
+              <motion.img
+                key={activeLightboxFile.path}
+                src={activeLightboxFile.url}
+                alt={activeLightboxFile.name}
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.98 }}
+                transition={{ duration: 0.18 }}
+                className="max-w-full max-h-full object-contain rounded-xl shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              />
+            </div>
+
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-[182] px-4 py-2 rounded-xl bg-black/50 border border-white/10 text-white text-xs font-bold max-w-[90vw] truncate">
+              {activeLightboxFile.name}
+            </div>
+          </motion.div>
         )}
       </AnimatePresence>
 
@@ -925,7 +1025,15 @@ function GalleryContent() {
                   key={file.path}
                   variants={itemVariants}
                   layout
-                  onClick={() => { if (selectionMode) toggleSelection(file.path); }}
+                  onClick={() => {
+                    if (selectionMode) {
+                      toggleSelection(file.path);
+                      return;
+                    }
+                    if (viewMode === 'grid') {
+                      openLightboxByPath(file.path);
+                    }
+                  }}
                   className={viewMode === 'grid' ?
                     `group relative rounded-3xl overflow-hidden transition-all duration-500 border aspect-[3/4] ${selectionMode && selectedItems.has(file.path)
                       ? (settings.theme === 'miku' ? 'border-[#39C5BB] shadow-[0_0_0_3px_rgba(57,197,187,0.3)] bg-white' : 'border-purple-500 shadow-[0_0_0_3px_rgba(168,85,247,0.3)] bg-[#090909]')
@@ -955,7 +1063,7 @@ function GalleryContent() {
                       alt={file.name}
                       loading="lazy"
                       className={viewMode === 'grid'
-                        ? "w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium relative z-10"
+                        ? "w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium relative z-10 cursor-zoom-in"
                         : "w-full h-auto select-none relative z-10"}
                       onLoad={(e) => {
                         const target = e.target as HTMLImageElement;
@@ -969,11 +1077,11 @@ function GalleryContent() {
                     {viewMode === 'grid' && (
                       <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-all flex flex-col justify-between p-4 z-20">
                         <div className="flex justify-end">
-                          <button onClick={() => handleDelete(file.path, 'image')} className="p-2 bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-all shadow-xl">
+                          <button onClick={(e) => { e.stopPropagation(); handleDelete(file.path, 'image'); }} className="p-2 bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-all shadow-xl">
                             <Trash2 size={16} />
                           </button>
                         </div>
-                        <a href={file.url} download={file.name} className="w-full py-2 bg-white text-black rounded-xl text-[10px] font-black uppercase tracking-widest text-center">下载原图</a>
+                        <a onClick={(e) => e.stopPropagation()} href={file.url} download={file.name} className="w-full py-2 bg-white text-black rounded-xl text-[10px] font-black uppercase tracking-widest text-center">下载原图</a>
                       </div>
                     )}
 
