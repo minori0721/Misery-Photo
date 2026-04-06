@@ -4,11 +4,11 @@ import {
   applyRemoveBucket,
   applySaveBucket,
   applySetActiveBucket,
-  attachBucketStateCookie,
   BucketConfigInput,
   getBucketStateSummary,
   listBucketPublicViews,
-  readBucketStateFromRequest,
+  persistBucketState,
+  readBucketState,
   testBucketConnectivity,
 } from '@/lib/bucket-config';
 
@@ -42,8 +42,8 @@ export async function GET(request: Request) {
   return NextResponse.json({
     success: true,
     data: {
-      buckets: listBucketPublicViews(request),
-      runtime: getBucketStateSummary(request),
+      buckets: await listBucketPublicViews(),
+      runtime: await getBucketStateSummary(),
     },
   });
 }
@@ -63,7 +63,7 @@ export async function POST(request: Request) {
       }, { status: tested.ok ? 200 : 400 });
     }
 
-    const currentState = readBucketStateFromRequest(request);
+    const currentState = await readBucketState();
 
     if (payload.action === 'save') {
       const result = applySaveBucket(currentState, payload.bucket, Boolean(payload.setActive));
@@ -85,7 +85,7 @@ export async function POST(request: Request) {
           })),
         },
       });
-      attachBucketStateCookie(response, result.state);
+      await persistBucketState(result.state);
       return response;
     }
 
@@ -108,7 +108,7 @@ export async function POST(request: Request) {
           })),
         },
       });
-      attachBucketStateCookie(response, nextState);
+      await persistBucketState(nextState);
       return response;
     }
 
@@ -136,7 +136,7 @@ export async function POST(request: Request) {
           })),
         },
       });
-      attachBucketStateCookie(response, nextState);
+      await persistBucketState(nextState);
       return response;
     }
 

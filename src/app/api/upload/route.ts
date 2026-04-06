@@ -10,7 +10,7 @@ export async function POST(request: Request) {
     const unauthorized = await requireApiAuth(request);
     if (unauthorized) return unauthorized;
 
-    const runtime = getBucketRuntimeFromRequest(request);
+    const runtime = await getBucketRuntimeFromRequest();
     if (!runtime) return noBucketConfiguredResponse();
 
     const s3Client = runtime.client;

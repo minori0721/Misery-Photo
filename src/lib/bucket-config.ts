@@ -1,11 +1,12 @@
 import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { NextResponse } from 'next/server';
-import { AUTH_COOKIE_NAME, buildSessionCookieOptions, readCookieFromHeader } from '@/lib/auth';
+import { kvGetString, kvSetString } from '@/lib/kv-store';
+import { decryptSecret, encryptSecret } from '@/lib/secret-crypto';
 
-export const BUCKET_CONFIG_COOKIE_NAME = 'nebula_bucket_configs';
 const MAX_BUCKETS = 5;
 const MAX_BUCKET_NAME_LENGTH = 64;
+const STATE_KEY_PREFIX = 'nebula:bucket-config:';
 
 export type BucketConfigInput = {
   id?: string;
@@ -29,7 +30,23 @@ type StoredBucketConfig = {
   forcePathStyle: boolean;
 };
 
-type BucketConfigState = {
+type PersistedBucketConfig = {
+  id: string;
+  name: string;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  accessKeyIdEncrypted: string;
+  secretAccessKeyEncrypted: string;
+  forcePathStyle: boolean;
+};
+
+type PersistedBucketConfigState = {
+  activeId: string | null;
+  buckets: PersistedBucketConfig[];
+};
+
+export type BucketConfigState = {
   activeId: string | null;
   buckets: StoredBucketConfig[];
 };
@@ -51,6 +68,14 @@ export type BucketRuntime = {
   region: string;
   source: 'state' | 'env';
 };
+
+function getOwnerKey(): string {
+  return process.env.ADMIN_USER?.trim() || 'admin';
+}
+
+function stateKeyForOwner(owner: string): string {
+  return `${STATE_KEY_PREFIX}${owner}`;
+}
 
 function safeJsonParse<T>(value: string, fallback: T): T {
   try {
@@ -109,16 +134,64 @@ function normalizeState(rawState: BucketConfigState): BucketConfigState {
   return { activeId, buckets: normalized };
 }
 
-export function readBucketStateFromRequest(request: Request): BucketConfigState {
-  const encoded = readCookieFromHeader(request.headers.get('cookie'), BUCKET_CONFIG_COOKIE_NAME);
-  if (!encoded) return { activeId: null, buckets: [] };
-
-  const stateRaw = safeJsonParse<BucketConfigState>(encoded, { activeId: null, buckets: [] });
-  return normalizeState(stateRaw);
+function toPersistedState(state: BucketConfigState): PersistedBucketConfigState {
+  const normalized = normalizeState(state);
+  return {
+    activeId: normalized.activeId,
+    buckets: normalized.buckets.map((bucket) => ({
+      id: bucket.id,
+      name: bucket.name,
+      endpoint: bucket.endpoint,
+      region: bucket.region,
+      bucket: bucket.bucket,
+      accessKeyIdEncrypted: encryptSecret(bucket.accessKeyId),
+      secretAccessKeyEncrypted: encryptSecret(bucket.secretAccessKey),
+      forcePathStyle: bucket.forcePathStyle,
+    })),
+  };
 }
 
-function toCookieValue(state: BucketConfigState): string {
-  return JSON.stringify(normalizeState(state));
+function fromPersistedState(persisted: PersistedBucketConfigState): BucketConfigState {
+  const buckets = Array.isArray(persisted.buckets) ? persisted.buckets : [];
+
+  const decryptedBuckets: StoredBucketConfig[] = [];
+  for (const bucket of buckets) {
+    try {
+      const accessKeyId = decryptSecret(bucket.accessKeyIdEncrypted);
+      const secretAccessKey = decryptSecret(bucket.secretAccessKeyEncrypted);
+      const normalized = normalizeBucketConfig({
+        id: bucket.id,
+        name: bucket.name,
+        endpoint: bucket.endpoint,
+        region: bucket.region,
+        bucket: bucket.bucket,
+        accessKeyId,
+        secretAccessKey,
+        forcePathStyle: bucket.forcePathStyle,
+      });
+      if (normalized) decryptedBuckets.push(normalized);
+    } catch {
+      // Skip broken entries to avoid total outage from a single invalid record.
+    }
+  }
+
+  return normalizeState({
+    activeId: persisted.activeId,
+    buckets: decryptedBuckets,
+  });
+}
+
+async function readBucketStateFromKv(owner = getOwnerKey()): Promise<BucketConfigState> {
+  const raw = await kvGetString(stateKeyForOwner(owner));
+  if (!raw) return { activeId: null, buckets: [] };
+
+  const persisted = safeJsonParse<PersistedBucketConfigState>(raw, { activeId: null, buckets: [] });
+  return fromPersistedState(persisted);
+}
+
+async function writeBucketStateToKv(state: BucketConfigState, owner = getOwnerKey()): Promise<void> {
+  const payload = JSON.stringify(toPersistedState(state));
+  await kvSetString(stateKeyForOwner(owner), payload);
 }
 
 function buildS3ClientFromStored(config: StoredBucketConfig): S3Client {
@@ -175,18 +248,22 @@ function getActiveStoredBucket(state: BucketConfigState): StoredBucketConfig | n
   return active || state.buckets[0] || null;
 }
 
-export function getBucketRuntimeFromRequest(request: Request): BucketRuntime | null {
-  const state = readBucketStateFromRequest(request);
-  const active = getActiveStoredBucket(state);
+export async function getBucketRuntimeFromRequest(): Promise<BucketRuntime | null> {
+  try {
+    const state = await readBucketStateFromKv();
+    const active = getActiveStoredBucket(state);
 
-  if (active) {
-    return {
-      client: buildS3ClientFromStored(active),
-      bucketName: active.bucket,
-      endpoint: active.endpoint,
-      region: active.region,
-      source: 'state',
-    };
+    if (active) {
+      return {
+        client: buildS3ClientFromStored(active),
+        bucketName: active.bucket,
+        endpoint: active.endpoint,
+        region: active.region,
+        source: 'state',
+      };
+    }
+  } catch {
+    // Fall back to env runtime when KV is unavailable.
   }
 
   return getEnvBucketRuntime();
@@ -199,8 +276,8 @@ export function noBucketConfiguredResponse() {
   );
 }
 
-export function listBucketPublicViews(request: Request): BucketPublicView[] {
-  const state = readBucketStateFromRequest(request);
+export async function listBucketPublicViews(): Promise<BucketPublicView[]> {
+  const state = await readBucketStateFromKv();
   return state.buckets.map((bucket) => ({
     id: bucket.id,
     name: bucket.name,
@@ -218,7 +295,7 @@ export function applySaveBucket(state: BucketConfigState, bucketInput: BucketCon
     return { state, error: '存储桶配置不合法，请检查 endpoint/bucket/access key/secret key' };
   }
 
-  let buckets = [...state.buckets];
+  const buckets = [...state.buckets];
   const existingIndex = buckets.findIndex((item) => item.id === normalized.id);
   if (existingIndex >= 0) {
     buckets[existingIndex] = normalized;
@@ -246,15 +323,16 @@ export function applySetActiveBucket(state: BucketConfigState, id: string) {
   return normalizeState({ buckets: state.buckets, activeId: id });
 }
 
-export function attachBucketStateCookie(response: NextResponse, state: BucketConfigState) {
-  response.cookies.set(BUCKET_CONFIG_COOKIE_NAME, toCookieValue(state), {
-    ...buildSessionCookieOptions(),
-    httpOnly: true,
-  });
+export async function persistBucketState(state: BucketConfigState) {
+  await writeBucketStateToKv(state);
 }
 
-export function clearBucketStateCookie(response: NextResponse) {
-  response.cookies.set(BUCKET_CONFIG_COOKIE_NAME, '', {
+export async function readBucketState() {
+  return readBucketStateFromKv();
+}
+
+export function clearLegacyBucketStateCookie(response: NextResponse) {
+  response.cookies.set('nebula_bucket_configs', '', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
@@ -283,16 +361,12 @@ export async function testBucketConnectivity(bucketInput: BucketConfigInput) {
   }
 }
 
-export function getBucketStateSummary(request: Request) {
-  const runtime = getBucketRuntimeFromRequest(request);
+export async function getBucketStateSummary() {
+  const runtime = await getBucketRuntimeFromRequest();
   return {
     hasActiveBucket: Boolean(runtime),
     source: runtime?.source || null,
     endpoint: runtime?.endpoint || null,
     bucketName: runtime?.bucketName || null,
   };
-}
-
-export function hasSessionCookie(request: Request): boolean {
-  return Boolean(readCookieFromHeader(request.headers.get('cookie'), AUTH_COOKIE_NAME));
 }
