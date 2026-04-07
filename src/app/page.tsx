@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Folder,
   Image as ImageIcon,
+  PlayCircle,
   ChevronLeft,
   ChevronRight,
   Upload,
@@ -30,6 +31,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import UploadModal from '@/components/UploadModal';
 import SettingsModal from '@/components/SettingsModal';
 import TargetPickerModal from '@/components/TargetPickerModal';
+import VideoPlayerModal from '@/components/VideoPlayerModal';
 import JSZip from 'jszip';
 import { useSettings, ISettings } from '@/lib/useSettings';
 
@@ -46,12 +48,13 @@ type GalleryFile = {
   url: string;
   size: number;
   lastModified: string;
-  type: 'image';
+  type: 'image' | 'video';
 };
 type GalleryData = { folders: GalleryFolder[]; files: GalleryFile[]; currentPath: string };
 type FileToDownload = { name: string; url: string; zipPath: string };
 
 const IMAGE_EXT_RE = /\.(jpg|jpeg|png|webp|gif)$/i;
+const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v|m3u8)$/i;
 const naturalSort = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 
 const textContent = (el: Element, tagName: string) => el.getElementsByTagName(tagName)[0]?.textContent || '';
@@ -82,14 +85,17 @@ function parseS3ListXml(xmlString: string, path: string) {
   const filesMeta = contents
     .map((item) => {
       const key = textContent(item, 'Key');
-      if (!key || key === path || !IMAGE_EXT_RE.test(key)) return null;
+      if (!key || key === path) return null;
+      const mediaType = IMAGE_EXT_RE.test(key) ? 'image' : VIDEO_EXT_RE.test(key) ? 'video' : null;
+      if (!mediaType) return null;
       return {
         key,
         size: Number(textContent(item, 'Size') || '0'),
         lastModified: textContent(item, 'LastModified') || '',
+        mediaType,
       };
     })
-    .filter((f): f is { key: string; size: number; lastModified: string } => Boolean(f));
+    .filter((f): f is { key: string; size: number; lastModified: string; mediaType: 'image' | 'video' } => Boolean(f));
 
   const isTruncated = textContent(xml.documentElement, 'IsTruncated') === 'true';
   const nextContinuationToken = textContent(xml.documentElement, 'NextContinuationToken') || null;
@@ -129,6 +135,7 @@ function GalleryContent() {
   const [bucketRefreshTick, setBucketRefreshTick] = useState(0);
   const [activeAbortController, setActiveAbortController] = useState<AbortController | null>(null);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [activeVideoFile, setActiveVideoFile] = useState<GalleryFile | null>(null);
 
   const toastIdRef = useRef(0);
   const galleryReqIdRef = useRef(0);
@@ -252,7 +259,7 @@ function GalleryContent() {
     setNoBucketConfigured(false);
     try {
       const foldersMap = new Map<string, GalleryFolder>();
-      const filesMetaMap = new Map<string, { key: string; size: number; lastModified: string }>();
+      const filesMetaMap = new Map<string, { key: string; size: number; lastModified: string; mediaType: 'image' | 'video' }>();
       let continuationToken: string | null = null;
 
       do {
@@ -290,7 +297,7 @@ function GalleryContent() {
             url,
             size: meta.size,
             lastModified: meta.lastModified,
-            type: 'image' as const,
+            type: meta.mediaType,
           };
         })
         .filter((f): f is GalleryFile => Boolean(f));
@@ -342,7 +349,10 @@ function GalleryContent() {
 
         const xmlText = await listRes.text();
         const parsed = parseS3ListXml(xmlText, path);
-        const previewKeys = parsed.filesMeta.map((m) => m.key).slice(0, 3);
+        const previewKeys = parsed.filesMeta
+          .filter((m) => m.mediaType === 'image')
+          .map((m) => m.key)
+          .slice(0, 3);
         if (previewKeys.length === 0) {
           previewCacheRef.current.set(path, []);
           return [];
@@ -392,28 +402,40 @@ function GalleryContent() {
     setLightboxIndex(null);
   }, []);
 
+  const closeVideoModal = useCallback(() => {
+    setActiveVideoFile(null);
+  }, []);
+
   const openLightboxByPath = useCallback((path: string) => {
-    const index = data.files.findIndex((file) => file.path === path);
+    const imageFiles = data.files.filter((file) => file.type === 'image');
+    const index = imageFiles.findIndex((file) => file.path === path);
     if (index >= 0) {
       setLightboxIndex(index);
     }
   }, [data.files]);
 
+  const openVideoModalByPath = useCallback((path: string) => {
+    const target = data.files.find((file) => file.path === path && file.type === 'video') || null;
+    setActiveVideoFile(target);
+  }, [data.files]);
+
   const showPrevLightbox = useCallback(() => {
-    if (!data.files.length) return;
+    const imageFiles = data.files.filter((file) => file.type === 'image');
+    if (!imageFiles.length) return;
     setLightboxIndex((prev) => {
       if (prev === null) return 0;
-      return (prev - 1 + data.files.length) % data.files.length;
+      return (prev - 1 + imageFiles.length) % imageFiles.length;
     });
-  }, [data.files.length]);
+  }, [data.files]);
 
   const showNextLightbox = useCallback(() => {
-    if (!data.files.length) return;
+    const imageFiles = data.files.filter((file) => file.type === 'image');
+    if (!imageFiles.length) return;
     setLightboxIndex((prev) => {
       if (prev === null) return 0;
-      return (prev + 1) % data.files.length;
+      return (prev + 1) % imageFiles.length;
     });
-  }, [data.files.length]);
+  }, [data.files]);
 
   useEffect(() => {
     if (lightboxIndex === null) return;
@@ -680,15 +702,15 @@ function GalleryContent() {
     }
   };
 
-  const handleDelete = async (path: string, type: 'image' | 'folder') => {
-    const confirmMsg = type === 'folder' ? '⚠ 警告：这将导致该画集及其中所有数据永久删除！确认吗？' : '确认删除这张照片吗？';
+  const handleDelete = async (path: string, type: 'image' | 'video' | 'folder') => {
+    const confirmMsg = type === 'folder' ? '⚠ 警告：这将导致该画集及其中所有数据永久删除！确认吗？' : '确认删除这个文件吗？';
     if (!confirm(confirmMsg)) return;
 
     try {
       const json = await fetchApiJson<any>('/api/gallery/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path, type }),
+        body: JSON.stringify({ path, type: type === 'folder' ? 'folder' : 'image' }),
       });
       if (json.success) {
         fetchGallery(currentPath);
@@ -703,7 +725,8 @@ function GalleryContent() {
   if (!mounted) return null;
 
   const allKeys = [...data.folders.map((f: any) => f.path), ...data.files.map((f: any) => f.path)];
-  const activeLightboxFile = lightboxIndex !== null ? data.files[lightboxIndex] : null;
+  const imageFiles = data.files.filter((file) => file.type === 'image');
+  const activeLightboxFile = lightboxIndex !== null ? imageFiles[lightboxIndex] : null;
 
   return (
     <div className={`min-h-screen selection:bg-purple-500/30 transition-colors duration-1000 ${settings.theme === 'miku'
@@ -755,6 +778,13 @@ function GalleryContent() {
         title={pendingAction === 'move' ? '移动到' : '复制到'}
         settings={settings}
         currentPath={currentPath}
+      />
+
+      <VideoPlayerModal
+        isOpen={Boolean(activeVideoFile)}
+        onClose={closeVideoModal}
+        url={activeVideoFile?.url || ''}
+        title={activeVideoFile?.name || ''}
       />
 
       {/* 下载进度条 - v0.6.0 重构支持取消与主题适配 */}
@@ -838,7 +868,7 @@ function GalleryContent() {
               <XIcon size={20} />
             </button>
 
-            {data.files.length > 1 && (
+            {imageFiles.length > 1 && (
               <>
                 <button
                   onClick={(e) => { e.stopPropagation(); showPrevLightbox(); }}
@@ -1038,6 +1068,10 @@ function GalleryContent() {
                       toggleSelection(file.path);
                       return;
                     }
+                    if (file.type === 'video') {
+                      openVideoModalByPath(file.path);
+                      return;
+                    }
                     if (viewMode === 'grid') {
                       openLightboxByPath(file.path);
                     }
@@ -1066,37 +1100,60 @@ function GalleryContent() {
                   <div className={`${viewMode === 'grid' ? "w-full h-full relative overflow-hidden" : "w-full"} min-h-[300px] overflow-hidden flex items-center justify-center transition-all duration-300 relative`}>
                     <div className={`absolute inset-0 animate-pulse ${settings.theme === 'miku' ? 'bg-slate-100' : 'bg-white/5'}`} />
 
-                    <img
-                      src={file.url}
-                      alt={file.name}
-                      loading="lazy"
-                      className={viewMode === 'grid'
-                        ? "w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium relative z-10 cursor-zoom-in"
-                        : "w-full h-auto select-none relative z-10"}
-                      onLoad={(e) => {
-                        const target = e.target as HTMLImageElement;
-                        target.parentElement?.style.setProperty('min-height', 'auto');
-                        const skeleton = target.parentElement?.querySelector('.animate-pulse');
-                        if (skeleton) (skeleton as HTMLElement).style.opacity = '0';
-                      }}
-                    />
+                    {file.type === 'video' ? (
+                      <>
+                        <video
+                          src={file.url}
+                          preload="metadata"
+                          className={viewMode === 'grid'
+                            ? 'w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 relative z-10'
+                            : 'w-full h-auto select-none relative z-10'}
+                          onLoadedData={(e) => {
+                            const target = e.target as HTMLVideoElement;
+                            target.parentElement?.style.setProperty('min-height', 'auto');
+                            const skeleton = target.parentElement?.querySelector('.animate-pulse');
+                            if (skeleton) (skeleton as HTMLElement).style.opacity = '0';
+                          }}
+                        />
+                        <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+                          <div className="w-14 h-14 rounded-full bg-black/55 backdrop-blur-sm border border-white/20 flex items-center justify-center text-white">
+                            <PlayCircle size={34} />
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <img
+                        src={file.url}
+                        alt={file.name}
+                        loading="lazy"
+                        className={viewMode === 'grid'
+                          ? 'w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium relative z-10 cursor-zoom-in'
+                          : 'w-full h-auto select-none relative z-10'}
+                        onLoad={(e) => {
+                          const target = e.target as HTMLImageElement;
+                          target.parentElement?.style.setProperty('min-height', 'auto');
+                          const skeleton = target.parentElement?.querySelector('.animate-pulse');
+                          if (skeleton) (skeleton as HTMLElement).style.opacity = '0';
+                        }}
+                      />
+                    )}
 
                     {/* 网格模式下的操作层 */}
                     {viewMode === 'grid' && (
                       <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-all flex flex-col justify-between p-4 z-20">
                         <div className="flex justify-end">
-                          <button onClick={(e) => { e.stopPropagation(); handleDelete(file.path, 'image'); }} className="p-2 bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-all shadow-xl">
+                          <button onClick={(e) => { e.stopPropagation(); handleDelete(file.path, file.type); }} className="p-2 bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-all shadow-xl">
                             <Trash2 size={16} />
                           </button>
                         </div>
-                        <a onClick={(e) => e.stopPropagation()} href={file.url} download={file.name} className="w-full py-2 bg-white text-black rounded-xl text-[10px] font-black uppercase tracking-widest text-center">下载原图</a>
+                        <a onClick={(e) => e.stopPropagation()} href={file.url} download={file.name} className="w-full py-2 bg-white text-black rounded-xl text-[10px] font-black uppercase tracking-widest text-center">{file.type === 'video' ? '下载视频' : '下载原图'}</a>
                       </div>
                     )}
 
                     {/* 漫画模式下的悬停管理 */}
                     {viewMode === 'manga' && (
                       <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity z-20">
-                        <button onClick={() => handleDelete(file.path, 'image')} className="p-3 bg-black/60 backdrop-blur-md rounded-full text-red-500 border border-white/10 shadow-2xl">
+                        <button onClick={(e) => { e.stopPropagation(); handleDelete(file.path, file.type); }} className="p-3 bg-black/60 backdrop-blur-md rounded-full text-red-500 border border-white/10 shadow-2xl">
                           <Trash2 size={24} />
                         </button>
                       </div>
