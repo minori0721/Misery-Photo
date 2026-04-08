@@ -10,6 +10,7 @@ import {
   Loader2,
   Package,
   FileImage,
+  FileVideo,
   ArrowUp
 } from 'lucide-react';
 import JSZip from 'jszip';
@@ -32,6 +33,25 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { settings } = useSettings();
 
+  const IMAGE_EXT_RE = /\.(jpg|jpeg|png|webp|gif)$/i;
+  const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v|m3u8|ts)$/i;
+
+  const getContentTypeByName = (filename: string) => {
+    const lower = filename.toLowerCase();
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.mp4') || lower.endsWith('.m4v')) return 'video/mp4';
+    if (lower.endsWith('.webm')) return 'video/webm';
+    if (lower.endsWith('.mov')) return 'video/quicktime';
+    if (lower.endsWith('.m3u8')) return 'application/vnd.apple.mpegurl';
+    if (lower.endsWith('.ts')) return 'video/mp2t';
+    return 'application/octet-stream';
+  };
+
+  const isMediaFileName = (name: string) => IMAGE_EXT_RE.test(name) || VIDEO_EXT_RE.test(name);
+
   const fetchApiJson = async <T = any>(input: RequestInfo | URL, init?: RequestInit): Promise<T> => {
     const res = await fetch(input, init);
     const contentType = res.headers.get('content-type') || '';
@@ -52,17 +72,18 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
     if (e.target.files) setFiles(Array.from(e.target.files));
   };
 
-  const uploadToS3 = async (file: Blob | File, filename: string, path: string) => {
+  const uploadToS3 = async (file: Blob | File, filename: string, path: string, contentType?: string) => {
+    const detectedContentType = contentType || (file as File).type || getContentTypeByName(filename);
     const presignJson = await fetchApiJson<{ url: string }>('/api/upload', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename, path, contentType: (file as File).type || 'image/jpeg' }),
+      body: JSON.stringify({ filename, path, contentType: detectedContentType }),
     });
     const { url } = presignJson;
     await fetch(url, {
       method: 'PUT',
       body: file,
-      headers: { 'Content-Type': (file as File).type || 'image/jpeg' },
+      headers: { 'Content-Type': detectedContentType },
     });
   };
 
@@ -70,59 +91,87 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
   async function buildUploadTasksFromZip(
     zip: JSZip,
     zipName: string
-  ): Promise<{ blob: Blob; name: string; path: string }[]> {
-    const isImg = (n: string) => /\.(jpg|jpeg|png|webp|gif)$/i.test(n);
+  ): Promise<{
+    tasks: { blob: Blob; name: string; path: string; contentType: string }[];
+    totalFiles: number;
+    mediaFiles: number;
+    ignoredFiles: number;
+    imageCount: number;
+    videoCount: number;
+  }> {
 
     // Build: folderPath -> Set<childFolderPaths> and folderPath -> string[] image paths
     const folderChildren = new Map<string, Set<string>>();
-    const folderImages = new Map<string, string[]>();
+    const folderMedia = new Map<string, string[]>();
     folderChildren.set('', new Set());
-    folderImages.set('', []);
+    folderMedia.set('', []);
+
+    let totalFiles = 0;
+    let mediaFiles = 0;
+    let imageCount = 0;
+    let videoCount = 0;
 
     for (const entryName of Object.keys(zip.files)) {
       const entry = zip.files[entryName];
+      if (!entry.dir) totalFiles++;
       const segs = entryName.split('/').filter(Boolean);
       for (let d = 0; d < segs.length; d++) {
         const parent = d === 0 ? '' : segs.slice(0, d).join('/') + '/';
         const isDir = entry.dir || d < segs.length - 1;
         const self = segs.slice(0, d + 1).join('/') + (isDir ? '/' : '');
-        if (!folderChildren.has(parent)) { folderChildren.set(parent, new Set()); folderImages.set(parent, []); }
+        if (!folderChildren.has(parent)) { folderChildren.set(parent, new Set()); folderMedia.set(parent, []); }
         if (isDir) {
           folderChildren.get(parent)!.add(self);
-          if (!folderChildren.has(self)) { folderChildren.set(self, new Set()); folderImages.set(self, []); }
-        } else if (isImg(entryName)) {
-          folderImages.get(parent)!.push(entryName);
+          if (!folderChildren.has(self)) { folderChildren.set(self, new Set()); folderMedia.set(self, []); }
+        } else if (isMediaFileName(entryName)) {
+          folderMedia.get(parent)!.push(entryName);
+          mediaFiles++;
+          if (IMAGE_EXT_RE.test(entryName)) imageCount++;
+          if (VIDEO_EXT_RE.test(entryName)) videoCount++;
         }
       }
     }
 
     // Collect leaf nodes (deepest folders containing images)
-    type Leaf = { album: string; imagePaths: string[] };
+    type Leaf = { album: string; mediaPaths: string[] };
     function collectLeaves(fp: string): Leaf[] {
       const ch = folderChildren.get(fp) || new Set<string>();
-      const imgs = folderImages.get(fp) || [];
+      const media = folderMedia.get(fp) || [];
       const albumName = fp ? fp.replace(/\/$/, '').split('/').pop()! : zipName;
-      // Leaf: no sub-folders but has images
-      if (ch.size === 0 && imgs.length > 0) return [{ album: albumName, imagePaths: imgs }];
+      // Leaf: no sub-folders but has media files
+      if (ch.size === 0 && media.length > 0) return [{ album: albumName, mediaPaths: media }];
       const out: Leaf[] = [];
       for (const c of Array.from(ch)) out.push(...collectLeaves(c));
-      // Mixed: this folder has both sub-folders and direct images
-      if (imgs.length > 0) out.push({ album: albumName, imagePaths: imgs });
+      // Mixed: this folder has both sub-folders and direct media files
+      if (media.length > 0) out.push({ album: albumName, mediaPaths: media });
       return out;
     }
 
     const albums = collectLeaves('');
-    const totalImgs = albums.reduce((s, a) => s + a.imagePaths.length, 0);
-    setStatus(`发现 ${albums.length} 个画集，共 ${totalImgs} 张图片，准备上传...`);
+    const totalMedia = albums.reduce((s, a) => s + a.mediaPaths.length, 0);
+    setStatus(`发现 ${albums.length} 个画集，共 ${totalMedia} 个媒体文件（图 ${imageCount} / 视频 ${videoCount}），准备上传...`);
 
-    const tasks: { blob: Blob; name: string; path: string }[] = [];
-    for (const { album, imagePaths } of albums) {
-      for (const imgPath of imagePaths) {
-        const blob = await zip.files[imgPath].async('blob');
-        tasks.push({ blob, name: imgPath.split('/').pop() || imgPath, path: `${currentPath}${album}/` });
+    const tasks: { blob: Blob; name: string; path: string; contentType: string }[] = [];
+    for (const { album, mediaPaths } of albums) {
+      for (const mediaPath of mediaPaths) {
+        const blob = await zip.files[mediaPath].async('blob');
+        const name = mediaPath.split('/').pop() || mediaPath;
+        tasks.push({
+          blob,
+          name,
+          path: `${currentPath}${album}/`,
+          contentType: getContentTypeByName(name),
+        });
       }
     }
-    return tasks;
+    return {
+      tasks,
+      totalFiles,
+      mediaFiles,
+      ignoredFiles: Math.max(0, totalFiles - mediaFiles),
+      imageCount,
+      videoCount,
+    };
   }
 
   const handleUpload = async () => {
@@ -131,7 +180,8 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
     setError('');
 
     try {
-      let uploadTasks: { blob: Blob | File; name: string; path: string }[] = [];
+      let uploadTasks: { blob: Blob | File; name: string; path: string; contentType: string }[] = [];
+      let ignoredFiles = 0;
 
       for (const file of files) {
         if (file.name.toLowerCase().endsWith('.zip')) {
@@ -143,27 +193,64 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
             }
           } as any);
           const zipName = file.name.replace(/\.zip$/i, '');
-          const zipTasks = await buildUploadTasksFromZip(zip, zipName);
-          uploadTasks.push(...zipTasks);
+          const zipResult = await buildUploadTasksFromZip(zip, zipName);
+          uploadTasks.push(...zipResult.tasks);
+          ignoredFiles += zipResult.ignoredFiles;
         } else {
-          uploadTasks.push({ blob: file, name: file.name, path: currentPath });
+          if (isMediaFileName(file.name) || file.type.startsWith('video/') || file.type.startsWith('image/')) {
+            uploadTasks.push({
+              blob: file,
+              name: file.name,
+              path: currentPath,
+              contentType: file.type || getContentTypeByName(file.name),
+            });
+          } else {
+            ignoredFiles++;
+          }
         }
       }
 
       const totalToUpload = uploadTasks.length;
-      let completed = 0;
+      if (totalToUpload === 0) {
+        throw new Error('没有可上传的媒体文件，请选择图片、视频或包含媒体文件的 ZIP。');
+      }
+
+      let processed = 0;
+      let success = 0;
+      let failed = 0;
+      const failedNames: string[] = [];
 
       for (let i = 0; i < uploadTasks.length; i += 5) {
         const chunk = uploadTasks.slice(i, i + 5);
-        await Promise.all(chunk.map(async (task) => {
-          await uploadToS3(task.blob, task.name, task.path);
-          completed++;
-          setStatus(`并行上传中: ${task.name}`);
-          setProgress(Math.round((completed / totalToUpload) * 100));
-        }));
+        const chunkResults = await Promise.allSettled(
+          chunk.map(async (task) => {
+            await uploadToS3(task.blob, task.name, task.path, task.contentType);
+            return task.name;
+          })
+        );
+
+        chunkResults.forEach((result, index) => {
+          if (result.status === 'fulfilled') {
+            success++;
+          } else {
+            failed++;
+            failedNames.push(chunk[index].name);
+          }
+        });
+
+        processed += chunk.length;
+        setStatus(`并行上传中：已处理 ${processed}/${totalToUpload}`);
+        setProgress(Math.round((processed / totalToUpload) * 100));
       }
 
-      setStatus('全部上传完成！');
+      setStatus(`上传完成：成功 ${success}，失败 ${failed}，忽略 ${ignoredFiles}`);
+
+      if (failed > 0) {
+        setError(`部分文件上传失败（${failed} 个）：${failedNames.slice(0, 3).join('、')}${failedNames.length > 3 ? ' 等' : ''}`);
+        setUploading(false);
+        return;
+      }
+
       setTimeout(() => {
         onRefresh();
         onClose();
@@ -220,7 +307,7 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
                 isMiku ? 'border-slate-200 hover:border-[#39C5BB]/60 hover:bg-[#39C5BB]/5 bg-white' : 'border-white/10 hover:border-purple-500/40 hover:bg-purple-500/5'
               }`}
             >
-              <input type="file" ref={fileInputRef} onChange={handleFileChange} multiple className="hidden" accept="image/*,.zip" />
+              <input type="file" ref={fileInputRef} onChange={handleFileChange} multiple className="hidden" accept="image/*,video/*,.zip,.m3u8,.ts" />
               <div className={`w-16 h-16 rounded-full flex items-center justify-center transition-all duration-300 group-hover:scale-110 ${
                 isMiku ? 'bg-slate-100 text-slate-300 group-hover:text-[#39C5BB]' : 'bg-white/5 text-white/20 group-hover:text-purple-400'
               }`}>
@@ -240,7 +327,9 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
                       <div className="flex items-center space-x-3 truncate">
                         {f.name.endsWith('.zip')
                           ? <Package className={isMiku ? 'text-blue-500 shrink-0' : 'text-blue-400 shrink-0'} size={18} />
-                          : <FileImage className={isMiku ? 'text-[#39C5BB] shrink-0' : 'text-purple-400 shrink-0'} size={18} />}
+                          : (VIDEO_EXT_RE.test(f.name) || f.type.startsWith('video/'))
+                            ? <FileVideo className={isMiku ? 'text-orange-500 shrink-0' : 'text-orange-400 shrink-0'} size={18} />
+                            : <FileImage className={isMiku ? 'text-[#39C5BB] shrink-0' : 'text-purple-400 shrink-0'} size={18} />}
                         <span className={`text-sm tracking-tight truncate ${isMiku ? 'text-slate-700 font-bold' : 'text-white/70'}`}>{f.name}</span>
                       </div>
                       <span className={`text-[10px] shrink-0 ${isMiku ? 'text-slate-400 font-bold' : 'text-white/20'}`}>{(f.size / 1024 / 1024).toFixed(2)} MB</span>
