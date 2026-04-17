@@ -1,70 +1,97 @@
 # Vercel 部署
 
-本文档覆盖 Misery-photo 在 Vercel 的推荐部署流程。
+本文档覆盖两个项目：
+
+- 主应用：Misery-photo（Next.js）
+- 文档站：Misery-photo Docs（VitePress）
 
 ## 1. 部署前准备
 
-需要准备：
+1. GitHub 仓库已可访问。
+2. 准备 KV（推荐 Upstash，或 Cloudflare KV）。
+3. 准备 S3 兼容桶参数。
+4. 准备两个随机字符串：AUTH_SECRET、BUCKET_ENCRYPTION_KEY。
 
-1. GitHub 代码仓库。
-2. 一个可用 KV（推荐 Upstash，或 Cloudflare KV）。
-3. 一组 S3 兼容存储参数。
-4. 强随机字符串：AUTH_SECRET 与 BUCKET_ENCRYPTION_KEY。
+## 2. 主应用部署（Next.js）
 
-## 2. 关键环境变量
+### 2.1 新建项目
 
-至少需要以下变量：
+1. 在 Vercel 选择仓库并创建项目。
+2. Root Directory 设为仓库根目录。
+3. Framework Preset 选择 Next.js。
+
+### 2.2 配置环境变量
 
 ```bash
 ADMIN_USER=用户名
 ADMIN_PASS=密码
 AUTH_SECRET=随机字符串
 BUCKET_ENCRYPTION_KEY=随机字符串
-
 BUCKET_STORE_PROVIDER=vercel
 
-# 可选：显式填写 Upstash REST
+# 可选显式配置
 KV_REST_API_URL=
 KV_REST_API_TOKEN=
 KV_REST_API_READ_ONLY_TOKEN=
-```
 
-可选后备桶：
-
-```bash
+# 可选后备桶
 S3_ENDPOINT=
 S3_REGION=auto
 S3_BUCKET=
 S3_ACCESS_KEY=
 S3_SECRET_KEY=
+
 PROXY_ALLOWED_HOSTS=
 ```
 
-## 3. 标准流程
+### 2.3 首次验证
 
-1. 在 Vercel 导入仓库。
-2. 配置环境变量并触发部署。
-3. 部署完成后访问站点并登录。
-4. 在设置中新增并测试桶连接。
-5. 激活桶后回到首页验证列表、上传、下载与批量操作。
+1. 登录后台。
+2. 新增并测试桶连接。
+3. 激活桶后验证列表、上传、下载、批量操作。
 
-## 4. 验证清单
+## 3. 文档站部署（VitePress）
 
-- 新设备登录后能读取已保存桶配置。
-- 切换桶后列表立即变化。
-- 上传图片/视频后可见。
-- 下载与批量操作可用。
+文档站建议作为同仓库第二个 Vercel 项目独立部署。
 
-## 5. 常见故障
+### 3.1 新建 docs 项目
 
-### 登录后提示无可用存储桶
+在 Vercel 新建项目后使用以下配置：
 
-- 可能是 KV 未连通，或环境变量未配置完整。
+- Root Directory: docs
+- Framework Preset: VitePress
+- Install Command: npm install
+- Build Command: npm run docs:build
+- Output Directory: .vitepress/dist
 
-### 设置保存失败
+文档站通常不需要额外环境变量。
 
-- 重点检查 Token 权限、Endpoint 格式、桶参数正确性。
+### 3.2 部署后检查
 
-### 重部署后桶配置丢失
+1. 首页和侧栏能正常打开。
+2. 本地搜索可用。
+3. 页面链接无 404。
 
-- 检查是否切换了 Vercel 环境，或修改了 BUCKET_ENCRYPTION_KEY。
+## 4. 推荐域名策略
+
+- 主应用：your-domain.com
+- 文档站：docs.your-domain.com
+
+两个项目独立部署可降低互相影响。
+
+## 5. 故障排查
+
+### 5.1 登录后无可用存储桶
+
+- 检查 BUCKET_STORE_PROVIDER 与 KV 变量。
+- 检查 BUCKET_ENCRYPTION_KEY 是否变更。
+
+### 5.2 文档站构建报 PostCSS/Tailwind 错误
+
+- 确认 docs 目录存在独立 PostCSS 配置。
+- 确认 docs 项目的 Root Directory 指向 docs。
+
+### 5.3 重部署后配置丢失
+
+- 检查是否切换了 Vercel 环境（Preview/Production）。
+- 检查环境变量是否在对应环境完整配置。
