@@ -1,9 +1,6 @@
 # Vercel 部署
 
-本文档覆盖两个项目：
-
-- 主应用：Misery-photo（Next.js）
-- 文档站：Misery-photo Docs（VitePress）
+本文档只覆盖 Misery-photo 主项目（Next.js）的生产部署。
 
 ## 1. 部署前准备
 
@@ -50,48 +47,24 @@ PROXY_ALLOWED_HOSTS=
 2. 新增并测试桶连接。
 3. 激活桶后验证列表、上传、下载、批量操作。
 
-## 3. 文档站部署（VitePress）
+## 3. 推荐域名策略
 
-文档站建议作为同仓库第二个 Vercel 项目独立部署。
+- 生产环境建议使用独立域名并启用 HTTPS。
+- 如需多环境，建议 `preview` 与 `production` 分域名管理。
 
-### 3.1 新建 docs 项目
-
-在 Vercel 新建项目后使用以下配置：
-
-- Root Directory: docs
-- Framework Preset: VitePress
-- Install Command: npm install
-- Build Command: npm run docs:build
-- Output Directory: .vitepress/dist
-
-文档站通常不需要额外环境变量。
-
-### 3.2 部署后检查
-
-1. 首页和侧栏能正常打开。
-2. 本地搜索可用。
-3. 页面链接无 404。
-
-## 4. 推荐域名策略
-
-- 主应用：your-domain.com
-- 文档站：docs.your-domain.com
-
-两个项目独立部署可降低互相影响。
-
-## 5. 故障排查
+## 4. 故障排查
 
 ### 5.1 登录后无可用存储桶
 
 - 检查 BUCKET_STORE_PROVIDER 与 KV 变量。
 - 检查 BUCKET_ENCRYPTION_KEY 是否变更。
 
-### 5.2 文档站构建报 PostCSS/Tailwind 错误
-
-- 确认 docs 目录存在独立 PostCSS 配置。
-- 确认 docs 项目的 Root Directory 指向 docs。
-
-### 5.3 重部署后配置丢失
+### 4.2 重部署后配置丢失
 
 - 检查是否切换了 Vercel 环境（Preview/Production）。
 - 检查环境变量是否在对应环境完整配置。
+
+### 4.3 上传或代理请求频繁超时
+
+- 检查对象存储 endpoint 连通性与区域设置。
+- 检查 `PROXY_ALLOWED_HOSTS` 是否包含目标域名。

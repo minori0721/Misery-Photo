@@ -1,5 +1,11 @@
 # 图库接口
 
+## 通用约束
+
+- 需要登录会话。
+- 路径字段最大长度通常为 1024。
+- 批量 keys 上限为 2000，批量 paths 上限为 1000。
+
 ## GET /api/gallery
 
 获取目录内容或签名模式列表入口。
@@ -11,6 +17,13 @@
 - foldersOnly: 1 表示仅返回文件夹（仅 json=1 有效）
 - continuationToken: 分页 token（签名模式）
 - maxKeys: 1-1000
+
+### 状态码
+
+- 200: 成功
+- 400: 参数不合法
+- 401: 未授权
+- 500: 服务端异常
 
 ### JSON 模式响应示例
 
@@ -52,6 +65,13 @@
 }
 ```
 
+### 状态码
+
+- 200: 成功
+- 400: action/keys 不合法
+- 401: 未授权
+- 500: 签名失败
+
 ### 响应示例
 
 ```json
@@ -82,6 +102,13 @@ type 可选值：
 - image
 - folder
 
+### 状态码
+
+- 200: 删除成功
+- 400: 参数不合法
+- 401: 未授权
+- 500: 删除失败
+
 ## POST /api/gallery/batch
 
 执行批量删除、复制、移动。
@@ -102,6 +129,22 @@ action 可选值：
 - copy
 - move
 
+### 成功响应示例
+
+```json
+{
+  "success": true,
+  "message": "已复制 12 个对象到 target/"
+}
+```
+
+### 状态码
+
+- 200: 操作成功
+- 400: 参数不合法或目标路径冲突
+- 401: 未授权
+- 500: 批量操作失败
+
 ### 说明
 
 - paths 数量上限 1000。
@@ -111,3 +154,19 @@ action 可选值：
 ## GET /api/gallery/folder-preview
 
 该接口已废弃，当前返回 410。
+
+## 调用示例
+
+### 列出根目录（签名模式）
+
+```bash
+curl "https://your-domain.com/api/gallery?path=" \
+  -H "Cookie: your-session-cookie"
+```
+
+### 仅获取文件夹（JSON 模式）
+
+```bash
+curl "https://your-domain.com/api/gallery?path=album/&json=1&foldersOnly=1" \
+  -H "Cookie: your-session-cookie"
+```

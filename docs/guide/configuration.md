@@ -2,6 +2,18 @@
 
 本页按用途说明关键环境变量，完整样例可参考仓库根目录的 `.env.example`。
 
+## 最小可用模板（推荐起步）
+
+```bash
+ADMIN_USER=admin
+ADMIN_PASS=your-password
+AUTH_SECRET=replace-with-random-string
+BUCKET_ENCRYPTION_KEY=replace-with-random-string
+BUCKET_STORE_PROVIDER=vercel
+```
+
+满足以上配置后即可登录并在设置页添加桶。
+
 ## 必填安全变量
 
 ```bash
@@ -27,6 +39,12 @@ BUCKET_STORE_PROVIDER=vercel
 - vercel：使用 Upstash REST 兼容路径。
 - cloudflare：使用 Cloudflare KV。
 
+## 存储后端选择建议
+
+- 个人快速上线：优先 `vercel`（搭配 Upstash）。
+- Cloudflare 生态：使用 `cloudflare`。
+- 需要自建但不想接 TCP Redis：提供 REST 网关后接入 `KV_REST_API_URL`。
+
 ## Vercel/Upstash 变量（推荐）
 
 ```bash
@@ -43,6 +61,8 @@ UPSTASH_REDIS_REST_TOKEN=
 - 读 Token: KV_REST_API_READ_ONLY_TOKEN -> KV_REST_API_TOKEN -> UPSTASH_REDIS_REST_TOKEN
 - 写 Token: KV_REST_API_TOKEN -> UPSTASH_REDIS_REST_TOKEN
 
+当你在 Vercel 已绑定 Upstash 时，通常只需配置 `BUCKET_STORE_PROVIDER=vercel`，其余可由自动注入变量兜底。
+
 ## Cloudflare KV 变量
 
 ```bash
@@ -55,6 +75,8 @@ CF_API_TOKEN=
 
 ## 可选后备桶
 
+## 可选后备桶
+
 当 KV 不可用或你只想维护一个桶时，可提供后备桶环境变量：
 
 ```bash
@@ -64,6 +86,11 @@ S3_BUCKET=
 S3_ACCESS_KEY=
 S3_SECRET_KEY=
 ```
+
+说明：
+
+- 后备桶适合单桶场景或临时恢复。
+- 多桶场景仍建议使用 KV 持久化。
 
 ## 代理白名单
 
@@ -80,3 +107,21 @@ PROXY_ALLOWED_HOSTS=example.com,cdn.example.com
 - 不要复用 AUTH_SECRET 与 BUCKET_ENCRYPTION_KEY。
 - 不要将真实密钥提交到仓库。
 - Preview 与 Production 环境变量建议分别配置并标记。
+
+## 常见配置错误
+
+### 1) 登录接口 500
+
+- 常见原因：`AUTH_SECRET` 缺失。
+
+### 2) 保存桶失败
+
+- 常见原因：`BUCKET_ENCRYPTION_KEY` 缺失，或 KV Token 权限不足。
+
+### 3) 上传成功但列表为空
+
+- 常见原因：激活桶不是目标桶，或 endpoint/region 配错。
+
+### 4) 代理接口 403
+
+- 常见原因：目标域名不在白名单（`PROXY_ALLOWED_HOSTS`）。
