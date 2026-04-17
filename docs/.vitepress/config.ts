@@ -41,7 +41,8 @@ export default defineConfig({
           text: '03 部署上线',
           items: [
             { text: 'Vercel 部署', link: '/deploy/vercel' },
-            { text: '自建部署', link: '/deploy/self-hosted' }
+            { text: '自建部署', link: '/deploy/self-hosted' },
+            { text: 'Docker 部署', link: '/deploy/docker' }
           ]
         },
         {

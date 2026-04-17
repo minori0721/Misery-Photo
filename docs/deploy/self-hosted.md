@@ -5,6 +5,7 @@
 ## 1. 运行环境
 
 - Node.js 18+
+- Docker / Docker Compose（若使用容器方式）
 - 具备公网 HTTPS 入口（建议通过反向代理）
 - 可访问对象存储与 KV 服务
 
@@ -16,6 +17,8 @@
 
 ## 3. 基础部署步骤
 
+### 3.1 直接 Node.js 运行
+
 1. 拉取代码并安装依赖。
 2. 配置生产环境变量。
 3. 执行构建并启动服务。
@@ -26,6 +29,14 @@ npm install
 npm run build
 npm run start
 ```
+
+### 3.2 Docker 运行（推荐给小白）
+
+如果你想通过一个 compose 文件快速部署，建议直接使用 Docker 方案：
+
+- [Docker 部署教程](/deploy/docker)
+
+这套方案支持“拉镜像即部署”与“本地构建部署”两种模式。
 
 ## 4. systemd 示例
 

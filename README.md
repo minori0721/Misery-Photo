@@ -48,6 +48,7 @@ npm run start
 
 - 新手上手：[https://docs.photo.minori.eu.cc/guide/quick-start](https://docs.photo.minori.eu.cc/guide/quick-start)
 - 部署上线：[https://docs.photo.minori.eu.cc/deploy/vercel](https://docs.photo.minori.eu.cc/deploy/vercel)
+- Docker 部署：[https://docs.photo.minori.eu.cc/deploy/docker](https://docs.photo.minori.eu.cc/deploy/docker)
 - 日常使用：[https://docs.photo.minori.eu.cc/features/media-management](https://docs.photo.minori.eu.cc/features/media-management)
 - 开发联调：[https://docs.photo.minori.eu.cc/api/index](https://docs.photo.minori.eu.cc/api/index)
 - 问题排查：[https://docs.photo.minori.eu.cc/faq/](https://docs.photo.minori.eu.cc/faq/)
@@ -62,3 +63,4 @@ npm run start
 
 - [https://docs.photo.minori.eu.cc/deploy/vercel](https://docs.photo.minori.eu.cc/deploy/vercel)
 - [https://docs.photo.minori.eu.cc/deploy/self-hosted](https://docs.photo.minori.eu.cc/deploy/self-hosted)
+- [https://docs.photo.minori.eu.cc/deploy/docker](https://docs.photo.minori.eu.cc/deploy/docker)
