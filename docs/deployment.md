@@ -63,7 +63,7 @@
 
 至少设置以下变量：
 
-```env
+```bash
 ADMIN_USER=用户名
 ADMIN_PASS=密码
 AUTH_SECRET=一组强随机字符串
