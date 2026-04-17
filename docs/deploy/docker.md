@@ -1,32 +1,13 @@
 # Docker 部署
 
-本页适用于希望通过镜像快速部署 Misery-photo 的场景。
+本页适用于希望通过已发布镜像快速部署 Misery-photo 的场景。
 
-## 1. 两种部署方式
+## 1. 部署方式
 
-### 方式 A：使用已发布镜像（推荐给普通用户）
+本项目 Docker 推荐方式：拉取已发布镜像并运行。
 
-优点：
 
-- 不需要本地构建。
-- 只需修改 docker-compose.yml 即可上线。
-
-前提：
-
-- 维护者已经将镜像发布到 Docker Hub/GHCR。
-
-### 方式 B：本地构建镜像
-
-优点：
-
-- 不依赖外部镜像仓库。
-- 适合开发调试或私有环境。
-
-缺点：
-
-- 每次更新都要重新构建镜像。
-
-## 2. 使用已发布镜像部署
+## 2. 标准部署（compose + .env）
 
 创建 `docker-compose.yml`：
 
@@ -52,6 +33,10 @@ BUCKET_ENCRYPTION_KEY=your-random-key
 BUCKET_STORE_PROVIDER=vercel
 ```
 
+环境变量完整说明见：
+
+- [环境变量与配置](/guide/configuration)
+
 启动命令：
 
 ```bash
@@ -61,60 +46,62 @@ docker compose up -d
 
 访问：`http://服务器IP:3000`
 
-## 3. 本地构建镜像部署
+## 3. 单文件部署（环境变量写在 yaml 内）
 
-在项目根目录执行：
+如果你希望只维护一个文件，可以把环境变量直接写到 compose 里。
 
-```bash
-docker build -t misery-photo:latest .
-```
-
-然后创建 `docker-compose.yml`：
+创建 `docker-compose.yml`：
 
 ```yaml
 services:
   misery-photo:
-    image: misery-photo:latest
+    image: yourname/misery-photo:latest
     container_name: misery-photo
     restart: always
     ports:
       - "3000:3000"
-    env_file:
-      - .env
+    environment:
+      - ADMIN_USER=admin
+      - ADMIN_PASS=your-password
+      - AUTH_SECRET=your-random-secret
+      - BUCKET_ENCRYPTION_KEY=your-random-key
+      - BUCKET_STORE_PROVIDER=vercel
+      # 多桶（Upstash/Cloudflare）或后备桶变量按需添加
+      # 参考: https://docs.photo.minori.eu.cc/guide/configuration
 ```
 
 启动命令：
-
-```bash
-docker compose up -d
-```
-
-## 4. 升级策略
-
-如果使用已发布镜像：
 
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
-如果使用本地构建镜像：
+## 4. 升级策略
 
 ```bash
-git pull
-docker build -t misery-photo:latest .
+docker compose pull
 docker compose up -d
 ```
+
+建议：
+
+- 生产环境优先使用固定版本 tag（例如 `v1.0.0`），不要长期使用 `latest`。
+- 升级前备份关键环境变量。
 
 ## 5. 常见问题
 
 ### 1) 容器启动后接口 500
 
-优先检查 `.env` 是否配置完整，尤其是：
+优先检查环境变量是否配置完整，尤其是：
 
 - AUTH_SECRET
 - BUCKET_ENCRYPTION_KEY
 - BUCKET_STORE_PROVIDER
+
+完整变量说明：
+
+- [环境变量与配置](/guide/configuration)
 
 ### 2) 无法连接对象存储
 
@@ -126,5 +113,11 @@ docker compose up -d
 
 ### 3) 更新后不生效
 
-- 已发布镜像请执行 `docker compose pull`
-- 本地构建请确认重新执行了 `docker build`
+- 是否执行了 `docker compose pull`
+- compose 中是否仍指向旧 tag
+
+### 4) 我不知道变量该怎么填
+
+请先看：
+
+- [环境变量与配置](/guide/configuration)

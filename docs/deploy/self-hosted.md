@@ -20,7 +20,7 @@
 ### 3.1 直接 Node.js 运行
 
 1. 拉取代码并安装依赖。
-2. 配置生产环境变量。
+2. 配置生产环境变量（填写说明见 [环境变量与配置](/guide/configuration)）。
 3. 执行构建并启动服务。
 4. 反向代理到 3000 端口并启用 HTTPS。
 
@@ -30,13 +30,12 @@ npm run build
 npm run start
 ```
 
-### 3.2 Docker 运行（推荐给小白）
+### 3.2 Docker 运行
 
 如果你想通过一个 compose 文件快速部署，建议直接使用 Docker 方案：
 
 - [Docker 部署教程](/deploy/docker)
 
-这套方案支持“拉镜像即部署”与“本地构建部署”两种模式。
 
 ## 4. systemd 示例
 
