@@ -532,7 +532,7 @@ function GalleryContent() {
 
     const total = Number(res.headers.get('content-length') || '0');
     const reader = res.body.getReader();
-    const chunks: Uint8Array[] = [];
+    const chunks: BlobPart[] = [];
     let loaded = 0;
     let lastLoaded = 0;
     let lastTs = Date.now();
@@ -541,7 +541,9 @@ function GalleryContent() {
       const { done, value } = await reader.read();
       if (done) break;
       if (value) {
-        chunks.push(value);
+        const copy = new Uint8Array(value.byteLength);
+        copy.set(value);
+        chunks.push(copy);
         loaded += value.length;
         const now = Date.now();
         const deltaTime = Math.max(1, now - lastTs) / 1000;
