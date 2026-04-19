@@ -25,6 +25,7 @@ import {
   XCircle,
   AlertCircle,
   X as XIcon,
+  Minimize2,
 } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import UploadModal from '@/components/UploadModal';
@@ -50,6 +51,37 @@ type GalleryFile = {
 };
 type GalleryData = { folders: GalleryFolder[]; files: GalleryFile[]; currentPath: string };
 type FileToDownload = { name: string; url: string; zipPath: string };
+type DownloadTask = {
+  id: string;
+  name: string;
+  loadedBytes: number;
+  totalBytes: number;
+  progress: number;
+  speedBps: number;
+  status: 'queued' | 'running' | 'success' | 'error';
+};
+
+const KB = 1024;
+const MB = 1024 * 1024;
+
+function formatTransferSpeed(speedBps: number): string {
+  if (!Number.isFinite(speedBps) || speedBps <= 0) return '0.0 KB/s';
+  if (speedBps >= MB) return `${(speedBps / MB).toFixed(2)} MB/s`;
+  return `${(speedBps / KB).toFixed(1)} KB/s`;
+}
+
+function formatTransferSize(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) return '0.0 KB';
+  if (size >= MB) return `${(size / MB).toFixed(2)} MB`;
+  return `${(size / KB).toFixed(1)} KB`;
+}
+
+function getProgressRingDash(progress: number, radius = 22): string {
+  const normalized = Math.max(0, Math.min(progress, 100));
+  const circumference = 2 * Math.PI * radius;
+  const filled = (normalized / 100) * circumference;
+  return `${filled} ${circumference - filled}`;
+}
 
 const IMAGE_EXT_RE = /\.(jpg|jpeg|png|webp|gif)$/i;
 const naturalSort = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
@@ -122,6 +154,13 @@ function GalleryContent() {
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadMinimized, setDownloadMinimized] = useState(false);
+  const [downloadCurrentFile, setDownloadCurrentFile] = useState('');
+  const [downloadCurrentFileProgress, setDownloadCurrentFileProgress] = useState(0);
+  const [downloadCompletedFiles, setDownloadCompletedFiles] = useState(0);
+  const [downloadTotalFiles, setDownloadTotalFiles] = useState(0);
+  const [downloadSpeedBps, setDownloadSpeedBps] = useState(0);
+  const [downloadTasks, setDownloadTasks] = useState<DownloadTask[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -137,6 +176,7 @@ function GalleryContent() {
   const previewInFlightRef = useRef<Map<string, Promise<string[]>>>(new Map());
   const previewActiveCountRef = useRef(0);
   const previewWaitersRef = useRef<Array<() => void>>([]);
+  const downloadSpeedRef = useRef<Map<string, number>>(new Map());
 
   // 多选模式
   const [selectionMode, setSelectionMode] = useState(false);
@@ -465,12 +505,71 @@ function GalleryContent() {
     setSelectedItems(new Set());
   };
 
+  const updateDownloadTask = useCallback((id: string, patch: Partial<DownloadTask>) => {
+    setDownloadTasks((prev) => prev.map((task) => (task.id === id ? { ...task, ...patch } : task)));
+  }, []);
+
+  const syncDownloadSpeedSum = useCallback(() => {
+    const sum = Array.from(downloadSpeedRef.current.values()).reduce((acc, val) => acc + val, 0);
+    setDownloadSpeedBps(sum);
+  }, []);
+
+  const fetchBlobWithProgress = useCallback(async (
+    url: string,
+    signal: AbortSignal,
+    onProgress: (loaded: number, total: number, speedBps: number) => void
+  ): Promise<Blob> => {
+    const res = await fetch(url, { signal });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    if (!res.body) {
+      const fallbackBlob = await res.blob();
+      onProgress(fallbackBlob.size, fallbackBlob.size, 0);
+      return fallbackBlob;
+    }
+
+    const total = Number(res.headers.get('content-length') || '0');
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let loaded = 0;
+    let lastLoaded = 0;
+    let lastTs = Date.now();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        loaded += value.length;
+        const now = Date.now();
+        const deltaTime = Math.max(1, now - lastTs) / 1000;
+        const deltaBytes = Math.max(0, loaded - lastLoaded);
+        const speedBps = deltaBytes / deltaTime;
+        lastLoaded = loaded;
+        lastTs = now;
+        onProgress(loaded, total || loaded, speedBps);
+      }
+    }
+
+    return new Blob(chunks);
+  }, []);
+
   // 取消下载
   const cancelDownload = () => {
     if (activeAbortController) {
       activeAbortController.abort();
       setActiveAbortController(null);
       setDownloading(false);
+      setDownloadMinimized(false);
+      setDownloadSpeedBps(0);
+      setDownloadCurrentFile('');
+      setDownloadCurrentFileProgress(0);
+      setDownloadCompletedFiles(0);
+      setDownloadTotalFiles(0);
+      setDownloadTasks([]);
+      downloadSpeedRef.current.clear();
       addToast('下载已取消', 'info');
     }
   };
@@ -529,7 +628,15 @@ function GalleryContent() {
     const controller = new AbortController();
     setActiveAbortController(controller);
     setDownloading(true);
+    setDownloadMinimized(false);
     setDownloadProgress(0);
+    setDownloadCurrentFile('');
+    setDownloadCurrentFileProgress(0);
+    setDownloadCompletedFiles(0);
+    setDownloadTotalFiles(0);
+    setDownloadSpeedBps(0);
+    setDownloadTasks([]);
+    downloadSpeedRef.current.clear();
     
     // 如果是多选触发，立即退出多选模式
     if (options?.files || options?.folders) {
@@ -567,28 +674,90 @@ function GalleryContent() {
 
       if (filesToDownload.length === 0) { 
         setDownloading(false); 
+        setDownloadMinimized(false);
+        setDownloadCurrentFile('');
+        setDownloadCurrentFileProgress(0);
+        setDownloadCompletedFiles(0);
+        setDownloadTotalFiles(0);
+        setDownloadSpeedBps(0);
+        setDownloadTasks([]);
+        downloadSpeedRef.current.clear();
         setActiveAbortController(null);
         return; 
       }
 
       let completed = 0;
       const total = filesToDownload.length;
+      setDownloadTotalFiles(total);
+
+      const initialTasks: DownloadTask[] = filesToDownload.map((file, index) => ({
+        id: `${Date.now()}-${index}-${file.name}`,
+        name: file.zipPath || file.name,
+        loadedBytes: 0,
+        totalBytes: 0,
+        progress: 0,
+        speedBps: 0,
+        status: 'queued',
+      }));
+      setDownloadTasks(initialTasks);
+
+      const fileIndexMap = new Map<string, string>();
+      initialTasks.forEach((task, index) => {
+        fileIndexMap.set(filesToDownload[index]?.zipPath || filesToDownload[index]?.name || task.name, task.id);
+      });
       
       // 并发下载逻辑 (v0.6.0 支持 AbortSignal)
       for (let i = 0; i < filesToDownload.length; i += 5) {
         if (signal.aborted) break;
         const chunk = filesToDownload.slice(i, i + 5);
         await Promise.all(chunk.map(async (file) => {
+          const taskId = fileIndexMap.get(file.zipPath || file.name);
           try {
-            const res = await fetch(file.url, { signal });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const blob = await res.blob();
+            if (taskId) {
+              updateDownloadTask(taskId, { status: 'running' });
+            }
+            setDownloadCurrentFile(file.name);
+
+            const blob = await fetchBlobWithProgress(file.url, signal, (loaded, totalBytes, speedBps) => {
+              if (!taskId) return;
+              const fileProgress = totalBytes > 0 ? Math.round((loaded / totalBytes) * 100) : 0;
+              updateDownloadTask(taskId, {
+                loadedBytes: loaded,
+                totalBytes,
+                progress: fileProgress,
+                speedBps,
+                status: 'running',
+              });
+              downloadSpeedRef.current.set(taskId, speedBps);
+              syncDownloadSpeedSum();
+              setDownloadCurrentFileProgress(fileProgress);
+            });
+
             zip.file(file.zipPath, blob);
             completed++;
+            setDownloadCompletedFiles(completed);
             setDownloadProgress(Math.round((completed / total) * 100));
+            setDownloadCurrentFileProgress(100);
+
+            if (taskId) {
+              downloadSpeedRef.current.set(taskId, 0);
+              updateDownloadTask(taskId, {
+                loadedBytes: blob.size,
+                totalBytes: blob.size,
+                progress: 100,
+                speedBps: 0,
+                status: 'success',
+              });
+              syncDownloadSpeedSum();
+            }
           } catch (err: any) {
             if (err.name === 'AbortError') throw err;
             console.error(`Failed to download ${file.name}`, err);
+            if (taskId) {
+              downloadSpeedRef.current.set(taskId, 0);
+              updateDownloadTask(taskId, { status: 'error', speedBps: 0 });
+              syncDownloadSpeedSum();
+            }
           }
         }));
       }
@@ -614,6 +783,14 @@ function GalleryContent() {
     } finally {
       setDownloading(false);
       setDownloadProgress(0);
+      setDownloadMinimized(false);
+      setDownloadCurrentFile('');
+      setDownloadCurrentFileProgress(0);
+      setDownloadCompletedFiles(0);
+      setDownloadTotalFiles(0);
+      setDownloadSpeedBps(0);
+      setDownloadTasks([]);
+      downloadSpeedRef.current.clear();
       setActiveAbortController(null);
     }
   };
@@ -757,52 +934,142 @@ function GalleryContent() {
         currentPath={currentPath}
       />
 
-      {/* 下载进度条 - v0.6.0 重构支持取消与主题适配 */}
+      {/* 下载传输中心：支持收起为圆形悬浮窗 */}
       <AnimatePresence>
-        {downloading && (
+        {downloading && !downloadMinimized && (
           <motion.div
-            initial={{ y: 100, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 100, opacity: 0 }}
-            className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[100] w-full max-w-sm"
+            initial={{ y: 28, opacity: 0, scale: 0.96 }}
+            animate={{ y: 0, opacity: 1, scale: 1 }}
+            exit={{ y: 28, opacity: 0, scale: 0.96 }}
+            transition={{ type: 'spring', stiffness: 230, damping: 22 }}
+            className="fixed bottom-6 right-6 z-[120] w-[92vw] max-w-md"
           >
-            <div className={`mx-4 border backdrop-blur-3xl p-4 rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.3)] flex items-center space-x-4 ${
-              settings.theme === 'miku' ? 'bg-white/90 border-[#39C5BB]/20' : 'bg-[#111]/90 border-white/10'
+            <div className={`border backdrop-blur-3xl rounded-3xl shadow-[0_20px_60px_rgba(0,0,0,0.35)] overflow-hidden ${
+              settings.theme === 'miku' ? 'bg-white/80 border-[#39C5BB]/25' : 'bg-[#111]/75 border-white/15'
             }`}>
-              <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 ${
-                settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-purple-500/10 text-purple-500'
-              }`}>
-                <Loader2 className="w-5 h-5 animate-spin" />
-              </div>
-              
-              <div className="flex-1">
-                <div className="flex justify-between items-end mb-1.5">
-                  <p className={`text-[10px] uppercase tracking-widest font-black ${
-                    settings.theme === 'miku' ? 'text-slate-400' : 'text-white/40'
-                  }`}>正在下载图集...</p>
-                  <span className={`text-xs font-bold font-mono ${
-                    settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-white'
-                  }`}>{downloadProgress}%</span>
+              <div className={`px-4 py-3 border-b flex items-center justify-between ${settings.theme === 'miku' ? 'border-[#39C5BB]/15' : 'border-white/10'}`}>
+                <div className="flex items-center gap-2">
+                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-blue-500/15 text-blue-400'}`}>
+                    <Download size={15} />
+                  </div>
+                  <div>
+                    <p className={`text-xs font-black uppercase tracking-widest ${settings.theme === 'miku' ? 'text-slate-600' : 'text-white/80'}`}>下载传输中心</p>
+                    <p className={`text-[11px] ${settings.theme === 'miku' ? 'text-slate-500' : 'text-white/45'}`}>{downloadCompletedFiles}/{downloadTotalFiles} 文件</p>
+                  </div>
                 </div>
-                <div className={`h-1.5 w-full rounded-full overflow-hidden ${
-                  settings.theme === 'miku' ? 'bg-slate-100' : 'bg-white/5'
-                }`}>
-                  <motion.div 
-                    initial={{ width: 0 }} 
-                    animate={{ width: `${downloadProgress}%` }} 
-                    className={`h-full ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-gradient-to-r from-purple-600 to-blue-600'}`} 
-                  />
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setDownloadMinimized(true)}
+                    className={`p-1.5 rounded-lg transition-colors ${settings.theme === 'miku' ? 'text-slate-500 hover:bg-slate-100' : 'text-white/60 hover:bg-white/10'}`}
+                    title="收起"
+                  >
+                    <Minimize2 size={14} />
+                  </button>
+                  <button
+                    onClick={cancelDownload}
+                    className={`p-1.5 rounded-lg transition-colors ${settings.theme === 'miku' ? 'text-slate-500 hover:bg-red-50 hover:text-red-500' : 'text-white/60 hover:bg-red-500/10 hover:text-red-400'}`}
+                    title="取消下载"
+                  >
+                    <XIcon size={14} />
+                  </button>
                 </div>
               </div>
 
-              <button 
-                onClick={cancelDownload}
-                className={`p-2 rounded-xl transition-all hover:scale-110 active:scale-95 ${
-                  settings.theme === 'miku' ? 'bg-slate-100 hover:bg-red-50 text-slate-400 hover:text-red-500' : 'bg-white/5 hover:bg-red-500/10 text-white/30 hover:text-red-400'
-                }`}
-              >
-                <XIcon size={16} />
-              </button>
+              <div className="p-4 space-y-3">
+                <div>
+                  <div className="flex items-end justify-between mb-1.5">
+                    <p className={`text-[11px] uppercase tracking-widest font-black ${settings.theme === 'miku' ? 'text-slate-500' : 'text-white/50'}`}>总体进度</p>
+                    <span className={`text-sm font-black ${settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-blue-400'}`}>{downloadProgress}%</span>
+                  </div>
+                  <div className={`h-2 w-full rounded-full overflow-hidden ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`}>
+                    <motion.div
+                      initial={{ width: 0 }}
+                      animate={{ width: `${downloadProgress}%` }}
+                      className={`h-full ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-gradient-to-r from-blue-500 to-cyan-400'}`}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-2 text-xs">
+                  <div>
+                    <p className={settings.theme === 'miku' ? 'text-slate-400' : 'text-white/45'}>当前处理文件</p>
+                    <p className={`font-bold truncate ${settings.theme === 'miku' ? 'text-slate-700' : 'text-white/85'}`}>{downloadCurrentFile || '-'}</p>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className={settings.theme === 'miku' ? 'text-slate-400' : 'text-white/45'}>单文件进度</span>
+                    <span className={`font-bold ${settings.theme === 'miku' ? 'text-slate-700' : 'text-white/85'}`}>{downloadCurrentFileProgress}%</span>
+                  </div>
+                  <div className={`h-1.5 rounded-full overflow-hidden ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`}>
+                    <motion.div
+                      initial={{ width: 0 }}
+                      animate={{ width: `${downloadCurrentFileProgress}%` }}
+                      className={`h-full ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-gradient-to-r from-blue-500 to-cyan-400'}`}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className={settings.theme === 'miku' ? 'text-slate-400' : 'text-white/45'}>当前速度</span>
+                    <span className={`font-bold ${settings.theme === 'miku' ? 'text-slate-700' : 'text-white/85'}`}>{formatTransferSpeed(downloadSpeedBps)}</span>
+                  </div>
+                </div>
+
+                <div className="max-h-44 overflow-y-auto pr-1 space-y-2">
+                  {downloadTasks.map((task) => (
+                    <div key={task.id} className={`rounded-xl border px-3 py-2.5 ${settings.theme === 'miku' ? 'bg-white/70 border-slate-200' : 'bg-white/5 border-white/10'}`}>
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <p className={`text-[11px] font-bold truncate ${settings.theme === 'miku' ? 'text-slate-700' : 'text-white/85'}`}>{task.name}</p>
+                        <span className={`text-[11px] font-black ${settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-blue-400'}`}>{task.progress}%</span>
+                      </div>
+                      <div className={`h-1.5 rounded-full overflow-hidden ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`}>
+                        <motion.div
+                          initial={{ width: 0 }}
+                          animate={{ width: `${task.progress}%` }}
+                          className={`h-full ${task.status === 'error' ? 'bg-red-500' : settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-gradient-to-r from-blue-500 to-cyan-400'}`}
+                        />
+                      </div>
+                      <div className="mt-1 flex items-center justify-between text-[10px]">
+                        <span className={settings.theme === 'miku' ? 'text-slate-500' : 'text-white/45'}>{formatTransferSize(task.loadedBytes)} / {formatTransferSize(task.totalBytes)}</span>
+                        <span className={settings.theme === 'miku' ? 'text-slate-500' : 'text-white/45'}>{task.status === 'success' ? '完成' : task.status === 'error' ? '失败' : formatTransferSpeed(task.speedBps)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {downloading && downloadMinimized && (
+          <motion.button
+            initial={{ opacity: 0, scale: 0.85, y: 14 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.85, y: 14 }}
+            onClick={() => setDownloadMinimized(false)}
+            className={`fixed bottom-8 left-8 z-[121] h-16 w-16 rounded-full border backdrop-blur-2xl shadow-2xl flex items-center justify-center ${
+              settings.theme === 'miku' ? 'bg-white/70 border-[#39C5BB]/30 text-[#39C5BB]' : 'bg-white/10 border-white/20 text-white'
+            }`}
+            title="展开下载面板"
+          >
+            <svg viewBox="0 0 56 56" className="absolute inset-1.5">
+              <circle cx="28" cy="28" r="22" fill="none" stroke={settings.theme === 'miku' ? 'rgba(57,197,187,0.2)' : 'rgba(255,255,255,0.2)'} strokeWidth="4" />
+              <motion.circle
+                cx="28"
+                cy="28"
+                r="22"
+                fill="none"
+                stroke={settings.theme === 'miku' ? '#39C5BB' : '#60a5fa'}
+                strokeWidth="4"
+                strokeLinecap="round"
+                strokeDasharray={getProgressRingDash(downloadProgress)}
+                transform="rotate(-90 28 28)"
+              />
+            </svg>
+            <div className="relative flex flex-col items-center justify-center leading-none">
+              <Download size={16} />
+              <span className="text-[9px] font-black mt-0.5">{downloadProgress}%</span>
+            </div>
+          </motion.button>
         )}
       </AnimatePresence>
 
