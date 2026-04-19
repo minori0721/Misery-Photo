@@ -3,6 +3,7 @@
 .vscode
 node_modules
 .next
+docs/
 docs/node_modules
 docs/.vitepress/dist
 npm-debug.log*

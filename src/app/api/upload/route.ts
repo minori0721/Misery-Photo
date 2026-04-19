@@ -4,6 +4,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { requireApiAuth } from '@/lib/auth';
 import { isValidStoragePath, toFolderPath } from '@/lib/validation';
 import { getBucketRuntimeFromRequest, noBucketConfiguredResponse } from '@/lib/bucket-config';
+import { getErrorMessage } from '@/lib/error-utils';
 
 export async function POST(request: Request) {
   try {
@@ -16,7 +17,11 @@ export async function POST(request: Request) {
     const s3Client = runtime.client;
     const bucketName = runtime.bucketName;
 
-    const { filename, path, contentType } = await request.json();
+    const { filename, path, contentType } = (await request.json()) as {
+      filename: string;
+      path: string;
+      contentType?: string;
+    };
     if (typeof filename !== 'string' || filename.length === 0 || filename.length > 255) {
       return NextResponse.json({ success: false, message: 'filename 不合法' }, { status: 400 });
     }
@@ -50,10 +55,10 @@ export async function POST(request: Request) {
       url: signedUrl,
       key: key,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('S3 Upload Presign Error:', error);
     return NextResponse.json(
-      { success: false, message: error.message || '获取上传链接失败' },
+      { success: false, message: getErrorMessage(error, '获取上传链接失败') },
       { status: 500 }
     );
   }

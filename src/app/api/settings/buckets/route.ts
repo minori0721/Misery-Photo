@@ -12,6 +12,7 @@ import {
   readBucketState,
   testBucketConnectivity,
 } from '@/lib/bucket-config';
+import { getErrorMessage } from '@/lib/error-utils';
 
 type SavePayload = {
   action: 'save';
@@ -132,9 +133,9 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({ success: false, message: '未知操作类型' }, { status: 400 });
-  } catch (error: any) {
+  } catch (error: unknown) {
     return NextResponse.json(
-      { success: false, message: error?.message || '存储桶配置操作失败' },
+      { success: false, message: getErrorMessage(error, '存储桶配置操作失败') },
       { status: 500 }
     );
   }

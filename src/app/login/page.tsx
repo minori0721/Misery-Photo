@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Lock, User, Loader2, Sparkles, HardDrive } from 'lucide-react';
+import { Lock, User, Loader2, HardDrive } from 'lucide-react';
 import { useSettings } from '@/lib/useSettings';
 
 export default function LoginPage() {
@@ -33,7 +33,7 @@ export default function LoginPage() {
       } else {
         setError(data.message || '登录失败');
       }
-    } catch (err) {
+    } catch {
       setError('网络繁忙，请稍后再试');
     } finally {
       setLoading(false);

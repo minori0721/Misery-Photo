@@ -4,6 +4,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { requireApiAuth } from '@/lib/auth';
 import { isValidStoragePath, uniqStrings } from '@/lib/validation';
 import { getBucketRuntimeFromRequest, noBucketConfiguredResponse } from '@/lib/bucket-config';
+import { getErrorMessage, isRecord } from '@/lib/error-utils';
 
 const naturalSort = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 
@@ -131,10 +132,10 @@ export async function GET(request: Request) {
         listUrl,
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('S3 List Error:', error);
     return NextResponse.json(
-      { success: false, message: error.message || '获取列表失败' },
+      { success: false, message: getErrorMessage(error, '获取列表失败') },
       { status: 500 }
     );
   }
@@ -151,10 +152,13 @@ export async function POST(request: Request) {
     const s3Client = runtime.client;
     const bucketName = runtime.bucketName;
 
-    const { action, keys } = await request.json() as {
-      action: 'sign-get-objects';
-      keys: string[];
-    };
+    const payload = (await request.json()) as unknown;
+    if (!isRecord(payload)) {
+      return NextResponse.json({ success: false, message: '请求体格式不合法' }, { status: 400 });
+    }
+
+    const action = payload.action;
+    const keys = payload.keys;
 
     if (action !== 'sign-get-objects') {
       return NextResponse.json({ success: false, message: '未知操作类型' }, { status: 400 });
@@ -192,10 +196,10 @@ export async function POST(request: Request) {
       success: true,
       data: Object.fromEntries(signedEntries),
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('S3 Sign GetObjects Error:', error);
     return NextResponse.json(
-      { success: false, message: error.message || '签名失败' },
+      { success: false, message: getErrorMessage(error, '签名失败') },
       { status: 500 }
     );
   }

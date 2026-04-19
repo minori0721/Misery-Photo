@@ -3,6 +3,7 @@ import { DeleteObjectCommand, DeleteObjectsCommand, ListObjectsV2Command, ListOb
 import { requireApiAuth } from '@/lib/auth';
 import { isValidStoragePath, toFolderPath } from '@/lib/validation';
 import { getBucketRuntimeFromRequest, noBucketConfiguredResponse } from '@/lib/bucket-config';
+import { getErrorMessage } from '@/lib/error-utils';
 
 export async function POST(request: Request) {
   try {
@@ -15,7 +16,7 @@ export async function POST(request: Request) {
     const s3Client = runtime.client;
     const bucketName = runtime.bucketName;
 
-    const { path, type } = await request.json(); // type: 'image' | 'folder'
+    const { path, type } = (await request.json()) as { path: string; type: 'image' | 'folder' };
 
     if (type !== 'image' && type !== 'folder') {
       return NextResponse.json({ success: false, message: 'type 不合法' }, { status: 400 });
@@ -59,10 +60,10 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('S3 Delete Error:', error);
     return NextResponse.json(
-      { success: false, message: error.message || '删除失败' },
+      { success: false, message: getErrorMessage(error, '删除失败') },
       { status: 500 }
     );
   }

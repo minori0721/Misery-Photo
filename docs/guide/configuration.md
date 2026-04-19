@@ -8,6 +8,7 @@
 ADMIN_USER=admin
 ADMIN_PASS=your-password
 AUTH_SECRET=replace-with-random-string
+AUTH_ALLOW_HTTP_LOGIN=false
 BUCKET_ENCRYPTION_KEY=replace-with-random-string
 BUCKET_STORE_PROVIDER=vercel
 ```
@@ -20,13 +21,21 @@ BUCKET_STORE_PROVIDER=vercel
 ADMIN_USER=admin
 ADMIN_PASS=your-password
 AUTH_SECRET=at-least-16-chars
+AUTH_ALLOW_HTTP_LOGIN=false
 BUCKET_ENCRYPTION_KEY=at-least-16-chars
 ```
 
 说明：
 
 - AUTH_SECRET 用于会话签名，缺失会导致鉴权接口不可用。
+- AUTH_ALLOW_HTTP_LOGIN 控制是否允许 HTTP 下写入登录会话 Cookie（默认 false）。
 - BUCKET_ENCRYPTION_KEY 用于桶密钥加密，变更后旧密文可能无法解密。
+
+## 登录与 HTTPS 行为
+
+- 默认建议使用 HTTPS，并保持 AUTH_ALLOW_HTTP_LOGIN=false。
+- 当服务仅能通过 HTTP 访问且确实需要登录时，可设置 AUTH_ALLOW_HTTP_LOGIN=true。
+- 开启后会降低会话安全性，建议仅用于内网调试或短期排障，恢复 HTTPS 后改回 false。
 
 ## 桶状态存储后端
 
@@ -107,6 +116,7 @@ PROXY_ALLOWED_HOSTS=example.com,cdn.example.com
 - 不要复用 AUTH_SECRET 与 BUCKET_ENCRYPTION_KEY。
 - 不要将真实密钥提交到仓库。
 - Preview 与 Production 环境变量建议分别配置并标记。
+- 非必要不要开启 AUTH_ALLOW_HTTP_LOGIN。
 
 ## 常见配置错误
 

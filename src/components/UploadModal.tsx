@@ -13,8 +13,9 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import JSZip from 'jszip';
+import type JSZip from 'jszip';
 import { useSettings } from '@/lib/useSettings';
+import { getErrorMessage, isRecord } from '@/lib/error-utils';
 
 interface UploadModalProps {
   isOpen: boolean;
@@ -83,16 +84,19 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
     return uploadTasks.find((item) => item.status === 'running') || uploadTasks[uploadTasks.length - 1];
   }, [uploadTasks]);
 
-  const fetchApiJson = async <T = any>(input: RequestInfo | URL, init?: RequestInit): Promise<T> => {
+  const fetchApiJson = async <T,>(input: RequestInfo | URL, init?: RequestInit): Promise<T> => {
     const res = await fetch(input, init);
     const contentType = res.headers.get('content-type') || '';
-    const payload = contentType.includes('application/json') ? await res.json() : null;
+    const payload = contentType.includes('application/json') ? (await res.json()) as unknown : null;
+    const payloadRecord = isRecord(payload) ? payload : undefined;
     if (res.status === 401) {
       router.push('/login');
-      throw new Error(payload?.message || '登录已过期，请重新登录');
+      const authMsg = typeof payloadRecord?.message === 'string' ? payloadRecord.message : '登录已过期，请重新登录';
+      throw new Error(authMsg);
     }
     if (!res.ok) {
-      throw new Error(payload?.message || `请求失败（${res.status}）`);
+      const errMsg = typeof payloadRecord?.message === 'string' ? payloadRecord.message : `请求失败（${res.status}）`;
+      throw new Error(errMsg);
     }
     return payload as T;
   };
@@ -258,15 +262,19 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
       for (const file of files) {
         if (file.name.toLowerCase().endsWith('.zip')) {
           setStatus(`正在解析压缩包: ${file.name}`);
+          const { default: JSZip } = await import('jszip');
           const zip = await JSZip.loadAsync(file, {
-            decodeFileName: (bytes: Uint8Array) => {
+            decodeFileName: (bytes) => {
+              const buffer = bytes instanceof Uint8Array
+                ? bytes
+                : new Uint8Array(bytes.map((value) => (typeof value === 'string' ? value.charCodeAt(0) : value)));
               try {
-                return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+                return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
               } catch {
-                return new TextDecoder('gbk').decode(bytes);
+                return new TextDecoder('gbk').decode(buffer);
               }
             },
-          } as any);
+          });
           const zipName = file.name.replace(/\.zip$/i, '');
           const zipTasks = await buildUploadTasksFromZip(zip, zipName);
           preparedTasks = [...preparedTasks, ...zipTasks];
@@ -343,9 +351,9 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
         setCompletedFiles(0);
         setTotalFiles(0);
       }, 1000);
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
-      setError(err.message || '上传过程中发生错误');
+      setError(getErrorMessage(err, '上传过程中发生错误'));
       setUploading(false);
       setAggregateSpeed(0);
       setStatus('上传失败');

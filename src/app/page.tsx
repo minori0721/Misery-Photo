@@ -3,8 +3,6 @@
 import { useState, useEffect, useCallback, Suspense, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Folder,
-  Image as ImageIcon,
   ChevronLeft,
   ChevronRight,
   Upload,
@@ -18,7 +16,6 @@ import {
   ArrowUp,
   Settings2,
   CheckSquare,
-  Square,
   Scissors,
   Copy,
   CheckCircle2,
@@ -31,8 +28,8 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import UploadModal from '@/components/UploadModal';
 import SettingsModal from '@/components/SettingsModal';
 import TargetPickerModal from '@/components/TargetPickerModal';
-import JSZip from 'jszip';
 import { useSettings, ISettings } from '@/lib/useSettings';
+import { getErrorCode, getErrorMessage, getErrorName, isRecord } from '@/lib/error-utils';
 
 // Toast 消息类型
 type Toast = { id: number; message: string; type: 'info' | 'success' | 'error' };
@@ -51,6 +48,16 @@ type GalleryFile = {
 };
 type GalleryData = { folders: GalleryFolder[]; files: GalleryFile[]; currentPath: string };
 type FileToDownload = { name: string; url: string; zipPath: string };
+type ApiBaseResponse = { success: boolean; message?: string; code?: string };
+type SignGetObjectsResponse = ApiBaseResponse & { data?: Record<string, string> };
+type SignerListResponse = ApiBaseResponse & {
+  data?: {
+    currentPath: string;
+    listUrl: string;
+  };
+};
+type BatchActionResponse = ApiBaseResponse;
+type DeleteActionResponse = ApiBaseResponse;
 type DownloadTask = {
   id: string;
   name: string;
@@ -196,20 +203,25 @@ function GalleryContent() {
     router.push('/login');
   }, [addToast, router]);
 
-  const fetchApiJson = useCallback(async <T = any>(input: RequestInfo | URL, init?: RequestInit): Promise<T> => {
+  const fetchApiJson = useCallback(async <T,>(input: RequestInfo | URL, init?: RequestInit): Promise<T> => {
     const res = await fetch(input, init);
     const contentType = res.headers.get('content-type') || '';
     const isJson = contentType.includes('application/json');
-    const payload = isJson ? await res.json() : null;
+    const payload = isJson ? (await res.json()) as unknown : null;
+    const payloadRecord = isRecord(payload) ? payload : undefined;
 
     if (res.status === 401) {
-      handleAuthExpired(payload?.message);
+      const authMsg = typeof payloadRecord?.message === 'string' ? payloadRecord.message : undefined;
+      handleAuthExpired(authMsg);
       throw new Error('UNAUTHORIZED');
     }
 
     if (!res.ok) {
-      const err = new Error(payload?.message || `请求失败（${res.status}）`) as Error & { code?: string };
-      err.code = payload?.code;
+      const errMsg = typeof payloadRecord?.message === 'string' ? payloadRecord.message : `请求失败（${res.status}）`;
+      const err = new Error(errMsg) as Error & { code?: string };
+      if (typeof payloadRecord?.code === 'string') {
+        err.code = payloadRecord.code;
+      }
       throw err;
     }
 
@@ -261,7 +273,7 @@ function GalleryContent() {
         const idx = cursor;
         cursor += 1;
         const chunkKeys = chunks[idx];
-        const signJson = await fetchApiJson<any>('/api/gallery', {
+        const signJson = await fetchApiJson<SignGetObjectsResponse>('/api/gallery', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
@@ -280,7 +292,7 @@ function GalleryContent() {
   }, [fetchApiJson]);
 
   // 获取文件列表（Signer Mode）：后端仅签名，前端直连 S3 拉 XML 并解析
-  const fetchGallery = async (path: string) => {
+  const fetchGallery = useCallback(async (path: string) => {
     const reqId = ++galleryReqIdRef.current;
     galleryAbortRef.current?.abort();
     const controller = new AbortController();
@@ -297,9 +309,13 @@ function GalleryContent() {
 
       do {
         const tokenPart = continuationToken ? `&continuationToken=${encodeURIComponent(continuationToken)}` : '';
-        const signerJson = await fetchApiJson<any>(`/api/gallery?path=${encodeURIComponent(path)}${tokenPart}`, { signal });
+        const signerJson = await fetchApiJson<SignerListResponse>(`/api/gallery?path=${encodeURIComponent(path)}${tokenPart}`, { signal });
         if (!signerJson.success) {
           throw new Error(signerJson.message || '获取列表签名失败');
+        }
+
+        if (!signerJson.data?.listUrl) {
+          throw new Error('列表签名响应缺少 listUrl');
         }
 
         const listRes = await fetch(signerJson.data.listUrl, { signal });
@@ -340,10 +356,10 @@ function GalleryContent() {
         setData({ folders, files, currentPath: path });
       }
     } catch (err: unknown) {
-      if ((err as { name?: string })?.name === 'AbortError') {
+      if (getErrorName(err) === 'AbortError') {
         return;
       }
-      const errCode = (err as { code?: string })?.code;
+      const errCode = getErrorCode(err);
       if (errCode === 'NO_BUCKET_CONFIG') {
         if (reqId === galleryReqIdRef.current) {
           setNoBucketConfigured(true);
@@ -352,7 +368,7 @@ function GalleryContent() {
         }
         return;
       }
-      const msg = err instanceof Error ? err.message : '获取数据失败';
+      const msg = getErrorMessage(err, '获取数据失败');
       if (reqId === galleryReqIdRef.current) {
         setError(msg);
       }
@@ -361,7 +377,7 @@ function GalleryContent() {
         setLoading(false);
       }
     }
-  };
+  }, [fetchApiJson, signObjectUrlsInPool]);
 
   // 文件夹缩略图也走直连：前端自己拿签名列表 + 解析 + 批量签图
   const fetchFolderPreviewDirect = useCallback(async (path: string): Promise<string[]> => {
@@ -374,8 +390,10 @@ function GalleryContent() {
     const run = (async () => {
       await acquirePreviewSlot();
       try {
-        const signerJson = await fetchApiJson<any>(`/api/gallery?path=${encodeURIComponent(path)}&maxKeys=12`);
+        const signerJson = await fetchApiJson<SignerListResponse>(`/api/gallery?path=${encodeURIComponent(path)}&maxKeys=12`);
         if (!signerJson.success) return [];
+
+        if (!signerJson.data?.listUrl) return [];
 
         const listRes = await fetch(signerJson.data.listUrl);
         if (!listRes.ok) return [];
@@ -388,7 +406,7 @@ function GalleryContent() {
           return [];
         }
 
-        const signJson = await fetchApiJson<any>('/api/gallery', {
+        const signJson = await fetchApiJson<SignGetObjectsResponse>('/api/gallery', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'sign-get-objects', keys: previewKeys }),
@@ -406,12 +424,12 @@ function GalleryContent() {
 
     previewInFlightRef.current.set(path, run);
     return run;
-  }, [acquirePreviewSlot, releasePreviewSlot]);
+  }, [acquirePreviewSlot, releasePreviewSlot, fetchApiJson]);
 
   useEffect(() => {
     fetchGallery(currentPath);
     setViewMode(currentPath ? 'manga' : 'grid');
-  }, [currentPath, bucketRefreshTick]);
+  }, [currentPath, bucketRefreshTick, fetchGallery]);
 
   useEffect(() => {
     return () => {
@@ -473,26 +491,22 @@ function GalleryContent() {
     router.push(`/?path=${encodeURIComponent(folderPath)}`);
   };
 
-  // 处理返回上级
-  const handleGoBack = () => {
-    const parts = currentPath.split('/').filter(Boolean);
-    parts.pop();
-    const newPath = parts.length > 0 ? parts.join('/') + '/' : '';
-    router.push(`/?path=${encodeURIComponent(newPath)}`);
-  };
-
   // 多选 helpers
   const toggleSelection = (key: string) => {
     setSelectedItems(prev => {
       const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
       return next;
     });
   };
   const toggleSelectAll = () => {
     const allKeys = [
-      ...data.folders.map((f: any) => f.path),
-      ...data.files.map((f: any) => f.path),
+      ...data.folders.map((f) => f.path),
+      ...data.files.map((f) => f.path),
     ];
     if (selectedItems.size === allKeys.length) {
       setSelectedItems(new Set());
@@ -587,9 +601,13 @@ function GalleryContent() {
 
       do {
         const tokenPart = continuationToken ? `&continuationToken=${encodeURIComponent(continuationToken)}` : '';
-        const signerJson = await fetchApiJson<any>(`/api/gallery?path=${encodeURIComponent(walkPath)}${tokenPart}`, { signal });
+        const signerJson = await fetchApiJson<SignerListResponse>(`/api/gallery?path=${encodeURIComponent(walkPath)}${tokenPart}`, { signal });
         if (!signerJson.success) {
           throw new Error(signerJson.message || '获取下载列表签名失败');
+        }
+
+        if (!signerJson.data?.listUrl) {
+          throw new Error('下载列表签名响应缺少 listUrl');
         }
 
         const listRes = await fetch(signerJson.data.listUrl, { signal });
@@ -623,7 +641,7 @@ function GalleryContent() {
         };
       })
       .filter((f): f is FileToDownload => Boolean(f));
-  }, [signObjectUrlsInPool]);
+  }, [signObjectUrlsInPool, fetchApiJson]);
 
   // 智能下载：支持子目录结构感知 + 可选只下载选中项
   const handleDownloadZip = async (options?: { files?: GalleryFile[]; folders?: GalleryFolder[]; zipName?: string }) => {
@@ -645,11 +663,12 @@ function GalleryContent() {
       exitSelectionMode();
     }
 
-    const zip = new JSZip();
     const folderName = options?.zipName || currentPath.split('/').filter(Boolean).pop() || 'gallery-export';
 
     try {
       const signal = controller.signal;
+      const { default: JSZip } = await import('jszip');
+      const zip = new JSZip();
 
       // 若当前路径下有子画集，递归获取结构
       const hasSubFolders = data.folders.length > 0 && !options?.files && !options?.folders;
@@ -752,8 +771,8 @@ function GalleryContent() {
               });
               syncDownloadSpeedSum();
             }
-          } catch (err: any) {
-            if (err.name === 'AbortError') throw err;
+          } catch (err: unknown) {
+            if (getErrorName(err) === 'AbortError') throw err;
             console.error(`Failed to download ${file.name}`, err);
             if (taskId) {
               downloadSpeedRef.current.set(taskId, 0);
@@ -775,8 +794,8 @@ function GalleryContent() {
       link.click();
       setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
       addToast('打包下载成功', 'success');
-    } catch (err: any) {
-      if (err.name === 'AbortError') {
+    } catch (err: unknown) {
+      if (getErrorName(err) === 'AbortError') {
         console.log('Download aborted by user');
       } else {
         console.error('Download error:', err);
@@ -833,7 +852,7 @@ function GalleryContent() {
     setPendingAction(null);
     exitSelectionMode();
     try {
-      const json = await fetchApiJson<any>('/api/gallery/batch', {
+      const json = await fetchApiJson<BatchActionResponse>('/api/gallery/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, paths, dest: dest ? `${dest}` : '' }),
@@ -864,7 +883,7 @@ function GalleryContent() {
     if (!confirm(confirmMsg)) return;
 
     try {
-      const json = await fetchApiJson<any>('/api/gallery/delete', {
+      const json = await fetchApiJson<DeleteActionResponse>('/api/gallery/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path, type }),
@@ -874,14 +893,14 @@ function GalleryContent() {
       } else {
         alert(json.message);
       }
-    } catch (err) {
+    } catch {
       alert('操作失败');
     }
   };
 
   if (!mounted) return null;
 
-  const allKeys = [...data.folders.map((f: any) => f.path), ...data.files.map((f: any) => f.path)];
+  const allKeys = [...data.folders.map((f) => f.path), ...data.files.map((f) => f.path)];
   const activeLightboxFile = lightboxIndex !== null ? data.files[lightboxIndex] : null;
 
   return (
@@ -1283,7 +1302,7 @@ function GalleryContent() {
               )}
 
               {/* 文件夹显示区域 (v0.5.0: 已取消预览数量限制) */}
-              {!error && viewMode === 'grid' && data.folders.map((folder: any) => (
+              {!error && viewMode === 'grid' && data.folders.map((folder) => (
                 <FolderCard
                   key={folder.path}
                   folder={folder}
@@ -1297,7 +1316,7 @@ function GalleryContent() {
               ))}
 
               {/* 文件显示区域 */}
-              {!error && data.files.map((file: any) => (
+              {!error && data.files.map((file) => (
                 <motion.div
                   key={file.path}
                   variants={itemVariants}
@@ -1335,6 +1354,7 @@ function GalleryContent() {
                   <div className={`${viewMode === 'grid' ? "w-full h-full relative overflow-hidden" : "w-full"} min-h-[300px] overflow-hidden flex items-center justify-center transition-all duration-300 relative`}>
                     <div className={`absolute inset-0 animate-pulse ${settings.theme === 'miku' ? 'bg-slate-100' : 'bg-white/5'}`} />
 
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={file.url}
                       alt={file.name}
@@ -1472,7 +1492,7 @@ export default function GalleryPage() {
 
 // 文件夹卡片组件：v0.5.0 重构支持异步封面加载
 function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSelected, fetchPreviewUrls }: {
-  folder: any; onClick: () => void; onDelete: () => void; settings: ISettings;
+  folder: GalleryFolder; onClick: () => void; onDelete: () => void; settings: ISettings;
   selectionMode?: boolean; isSelected?: boolean;
   fetchPreviewUrls: (path: string) => Promise<string[]>;
 }) {
@@ -1550,13 +1570,16 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
               initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               transition={{ duration: 0.8 }}
               className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-[3s]"
-              onError={(e) => { (e.target as any).src = "https://placehold.co/400x300/111/555?text=Album"; }}
+              onError={(e) => {
+                const target = e.currentTarget;
+                target.src = 'https://placehold.co/400x300/111/555?text=Album';
+              }}
             />
           )}
         </AnimatePresence>
 
         <div className="absolute bottom-16 left-1/2 -translate-x-1/2 flex space-x-1 pointer-events-none">
-          {previews.map((_: any, i: number) => (
+          {previews.map((_, i) => (
             <div key={i} className={`h-1.5 rounded-full transition-all ${i === currentIdx ? (settings.theme === 'miku' ? 'w-4 bg-[#39C5BB] shadow-[0_0_10px_#39C5BB]' : 'w-4 bg-purple-500 shadow-[0_0_10px_#A855F7]') : 'w-1.5 bg-white/50'}`} />
           ))}
         </div>

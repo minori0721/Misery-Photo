@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Settings2, Sparkles, Palette, LayoutGrid, Database, Check, Trash2, PlugZap, Info, Pencil } from 'lucide-react';
 import { ISettings } from '@/lib/useSettings';
+import { getErrorMessage } from '@/lib/error-utils';
 
 interface Props {
   isOpen: boolean;
@@ -34,6 +35,24 @@ type BucketForm = {
   forcePathStyle: boolean;
 };
 
+type BucketApiResponse<T = unknown> = {
+  success: boolean;
+  message?: string;
+  data?: T;
+};
+
+type BucketsData = {
+  buckets?: BucketView[];
+};
+
+type BucketData = {
+  bucket?: BucketForm;
+};
+
+type BucketActionPayload =
+  | { action: 'set-active'; id: string }
+  | { action: 'remove'; id: string };
+
 const EMPTY_BUCKET_FORM: BucketForm = {
   name: '',
   endpoint: '',
@@ -60,13 +79,13 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
     setBucketError('');
     try {
       const res = await fetch('/api/settings/buckets');
-      const data = await res.json();
+      const data = (await res.json()) as BucketApiResponse<BucketsData>;
       if (!res.ok || !data.success) {
         throw new Error(data.message || '获取存储桶配置失败');
       }
       setBuckets(data.data?.buckets || []);
-    } catch (error: any) {
-      setBucketError(error?.message || '读取存储桶失败');
+    } catch (error: unknown) {
+      setBucketError(getErrorMessage(error, '读取存储桶失败'));
     } finally {
       setLoadingBuckets(false);
     }
@@ -81,7 +100,7 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
     setBucketForm((prev) => ({ ...prev, [key]: value }));
   };
 
-  const handleBucketAction = async (payload: any, successMessage?: string) => {
+  const handleBucketAction = async (payload: BucketActionPayload, successMessage?: string) => {
     setSavingBucket(true);
     setBucketError('');
     setBucketMessage('');
@@ -91,7 +110,7 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
+      const data = (await res.json()) as BucketApiResponse<BucketsData>;
       if (!res.ok || !data.success) {
         throw new Error(data.message || '操作失败');
       }
@@ -103,8 +122,8 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
         setBucketMessage(successMessage);
       }
       onBucketsChanged?.();
-    } catch (error: any) {
-      setBucketError(error?.message || '操作失败');
+    } catch (error: unknown) {
+      setBucketError(getErrorMessage(error, '操作失败'));
     } finally {
       setSavingBucket(false);
     }
@@ -123,13 +142,13 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
           bucket: bucketForm,
         }),
       });
-      const data = await res.json();
+      const data = (await res.json()) as BucketApiResponse;
       if (!res.ok || !data.success) {
         throw new Error(data.message || '连接失败');
       }
       setBucketMessage(data.message || '连接成功');
-    } catch (error: any) {
-      setBucketError(error?.message || '连接失败');
+    } catch (error: unknown) {
+      setBucketError(getErrorMessage(error, '连接失败'));
     } finally {
       setTestingBucket(false);
     }
@@ -144,7 +163,7 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
         bucket: form,
       }),
     });
-    const data = await res.json();
+    const data = (await res.json()) as BucketApiResponse;
     if (!res.ok || !data.success) {
       throw new Error(data.message || '连接失败');
     }
@@ -166,7 +185,7 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
           setActive: true,
         }),
       });
-      const data = await res.json();
+      const data = (await res.json()) as BucketApiResponse<BucketsData>;
       if (!res.ok || !data.success) {
         throw new Error(data.message || '保存失败');
       }
@@ -176,8 +195,8 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
       setBucketMessage('连接成功，已保存并激活');
       setBucketForm(EMPTY_BUCKET_FORM);
       onBucketsChanged?.();
-    } catch (error: any) {
-      setBucketError(error?.message || '连接或保存失败');
+    } catch (error: unknown) {
+      setBucketError(getErrorMessage(error, '连接或保存失败'));
     } finally {
       setSavingBucket(false);
     }
@@ -192,14 +211,14 @@ export default function SettingsModal({ isOpen, onClose, settings, updateSetting
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'get-bucket', id }),
       });
-      const data = await res.json();
+      const data = (await res.json()) as BucketApiResponse<BucketData>;
       if (!res.ok || !data.success || !data.data?.bucket) {
         throw new Error(data.message || '读取存储桶配置失败');
       }
       setBucketForm(data.data.bucket);
       setBucketMessage('已加载配置，请修改后保存');
-    } catch (error: any) {
-      setBucketError(error?.message || '读取存储桶配置失败');
+    } catch (error: unknown) {
+      setBucketError(getErrorMessage(error, '读取存储桶配置失败'));
     }
   };
 
