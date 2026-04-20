@@ -36,8 +36,61 @@ type UploadTask = {
   status: 'queued' | 'running' | 'success' | 'error';
 };
 
+type MultipartCompletedPart = {
+  partNumber: number;
+  etag: string;
+};
+
+type MultipartSession = {
+  uploadId: string;
+  key: string;
+  filename: string;
+  path: string;
+  contentType: string;
+  fileSize: number;
+  partSize: number;
+  completedParts: MultipartCompletedPart[];
+  failedParts: number[];
+  fingerprint: string;
+};
+
+type MultipartCreateResponse = {
+  success: boolean;
+  message?: string;
+  data?: {
+    uploadId: string;
+    key: string;
+    partSize: number;
+  };
+};
+
+type MultipartSignPartResponse = {
+  success: boolean;
+  message?: string;
+  data?: {
+    url: string;
+  };
+};
+
+type MultipartCompleteResponse = {
+  success: boolean;
+  message?: string;
+};
+
+type MultipartFailedError = Error & {
+  code: 'MULTIPART_PARTIAL_FAILED';
+  session: MultipartSession;
+};
+
 const KB = 1024;
 const MB = 1024 * 1024;
+const MULTIPART_THRESHOLD_BYTES = 64 * MB;
+const MULTIPART_PART_SIZE = 32 * MB;
+const MULTIPART_PART_CONCURRENCY = 3;
+const LARGE_FILE_CONCURRENCY = 1;
+const SMALL_FILE_CONCURRENCY = 4;
+const MULTIPART_MAX_RETRIES = 3;
+const MULTIPART_SESSION_STORAGE_KEY = 'misery_photo_multipart_sessions_v1';
 
 function formatSpeed(speedBps: number): string {
   if (!Number.isFinite(speedBps) || speedBps <= 0) return '0.0 KB/s';
@@ -70,6 +123,8 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
   const [totalFiles, setTotalFiles] = useState(0);
   const [aggregateSpeed, setAggregateSpeed] = useState(0);
   const [uploadTasks, setUploadTasks] = useState<UploadTask[]>([]);
+  const [multipartPending, setMultipartPending] = useState<MultipartSession | null>(null);
+  const [multipartActionBusy, setMultipartActionBusy] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const loadedBytesRef = useRef<Map<string, number>>(new Map());
@@ -83,6 +138,56 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
     if (!uploadTasks.length) return null;
     return uploadTasks.find((item) => item.status === 'running') || uploadTasks[uploadTasks.length - 1];
   }, [uploadTasks]);
+
+  const getTaskFingerprint = (task: UploadTask): string => {
+    const file = task.blob as File;
+    const lastModified = typeof file.lastModified === 'number' ? file.lastModified : 0;
+    return `${task.path}|${task.name}|${task.totalBytes}|${lastModified}`;
+  };
+
+  const readMultipartSessionStore = (): Record<string, MultipartSession> => {
+    try {
+      const raw = localStorage.getItem(MULTIPART_SESSION_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as Record<string, MultipartSession>;
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+
+  const writeMultipartSessionStore = (store: Record<string, MultipartSession>) => {
+    try {
+      localStorage.setItem(MULTIPART_SESSION_STORAGE_KEY, JSON.stringify(store));
+    } catch {
+      // 忽略持久化失败，上传流程仍可继续
+    }
+  };
+
+  const saveMultipartSession = (session: MultipartSession) => {
+    const store = readMultipartSessionStore();
+    store[session.fingerprint] = session;
+    writeMultipartSessionStore(store);
+  };
+
+  const getSavedMultipartSession = (fingerprint: string): MultipartSession | null => {
+    const store = readMultipartSessionStore();
+    return store[fingerprint] || null;
+  };
+
+  const removeMultipartSession = (fingerprint: string) => {
+    const store = readMultipartSessionStore();
+    if (!store[fingerprint]) return;
+    delete store[fingerprint];
+    writeMultipartSessionStore(store);
+  };
+
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  const getBackoffDelay = (attempt: number): number => {
+    const jitter = Math.floor(Math.random() * 300);
+    return Math.min(1000 * (2 ** (attempt - 1)) + jitter, 15000);
+  };
 
   const fetchApiJson = async <T,>(input: RequestInfo | URL, init?: RequestInit): Promise<T> => {
     const res = await fetch(input, init);
@@ -102,7 +207,12 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) setFiles(Array.from(e.target.files));
+    if (e.target.files) {
+      setFiles(Array.from(e.target.files));
+      setError('');
+      setStatus('');
+      setMultipartPending(null);
+    }
   };
 
   if (!isOpen) return null;
@@ -156,7 +266,274 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
     });
   };
 
-  const uploadToS3 = async (task: UploadTask) => {
+  const putMultipartPartWithProgress = (
+    url: string,
+    partBlob: Blob,
+    onProgress: (loaded: number, total: number, speedBps: number) => void
+  ) => {
+    return new Promise<{ etag: string }>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      let lastLoaded = 0;
+      let lastTs = Date.now();
+
+      xhr.open('PUT', url, true);
+
+      xhr.upload.onprogress = (event) => {
+        const loaded = event.loaded;
+        const total = event.total || partBlob.size || loaded;
+        const now = Date.now();
+        const deltaTime = Math.max(1, now - lastTs) / 1000;
+        const deltaBytes = Math.max(0, loaded - lastLoaded);
+        const speedBps = deltaBytes / deltaTime;
+        lastLoaded = loaded;
+        lastTs = now;
+        onProgress(loaded, total, speedBps);
+      };
+
+      xhr.onerror = () => reject(new Error('分片上传请求失败'));
+      xhr.onabort = () => reject(new Error('分片上传已取消'));
+      xhr.onreadystatechange = () => {
+        if (xhr.readyState !== XMLHttpRequest.DONE) return;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const etag = xhr.getResponseHeader('ETag') || xhr.getResponseHeader('etag');
+          if (!etag) {
+            reject(new Error('分片上传成功但未返回 ETag，请检查对象存储 CORS ExposeHeaders'));
+            return;
+          }
+          resolve({ etag });
+        } else {
+          reject(new Error(`分片上传失败（${xhr.status}）`));
+        }
+      };
+
+      xhr.send(partBlob);
+    });
+  };
+
+  const createMultipartSession = async (task: UploadTask, partSize = MULTIPART_PART_SIZE): Promise<MultipartSession> => {
+    const contentType = (task.blob as File).type || 'application/octet-stream';
+    const fingerprint = getTaskFingerprint(task);
+    const createJson = await fetchApiJson<MultipartCreateResponse>('/api/upload/multipart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'create',
+        filename: task.name,
+        path: task.path,
+        contentType,
+        size: task.totalBytes,
+        partSize,
+      }),
+    });
+
+    if (!createJson.success || !createJson.data?.uploadId || !createJson.data.key) {
+      throw new Error(createJson.message || '创建分片上传会话失败');
+    }
+
+    return {
+      uploadId: createJson.data.uploadId,
+      key: createJson.data.key,
+      filename: task.name,
+      path: task.path,
+      contentType,
+      fileSize: task.totalBytes,
+      partSize: createJson.data.partSize || partSize,
+      completedParts: [],
+      failedParts: [],
+      fingerprint,
+    };
+  };
+
+  const signMultipartPart = async (session: MultipartSession, partNumber: number): Promise<string> => {
+    const signJson = await fetchApiJson<MultipartSignPartResponse>('/api/upload/multipart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'sign-part',
+        uploadId: session.uploadId,
+        key: session.key,
+        partNumber,
+      }),
+    });
+
+    if (!signJson.success || !signJson.data?.url) {
+      throw new Error(signJson.message || `获取分片 ${partNumber} 上传签名失败`);
+    }
+    return signJson.data.url;
+  };
+
+  const completeMultipartSession = async (session: MultipartSession) => {
+    const completeJson = await fetchApiJson<MultipartCompleteResponse>('/api/upload/multipart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'complete',
+        uploadId: session.uploadId,
+        key: session.key,
+        parts: [...session.completedParts].sort((a, b) => a.partNumber - b.partNumber),
+      }),
+    });
+
+    if (!completeJson.success) {
+      throw new Error(completeJson.message || '完成分片上传失败');
+    }
+  };
+
+  const abortMultipartSession = async (session: MultipartSession) => {
+    await fetchApiJson<{ success: boolean; message?: string }>('/api/upload/multipart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'abort',
+        uploadId: session.uploadId,
+        key: session.key,
+      }),
+    });
+  };
+
+  const uploadTaskWithMultipart = async (task: UploadTask, resumeSession?: MultipartSession) => {
+    const blob = task.blob;
+    const fileSize = task.totalBytes;
+    let session = resumeSession || getSavedMultipartSession(getTaskFingerprint(task)) || null;
+
+    if (!session) {
+      session = await createMultipartSession(task);
+      saveMultipartSession(session);
+    }
+
+    const totalParts = Math.ceil(fileSize / session.partSize);
+    const completedPartMap = new Map<number, string>(session.completedParts.map((p) => [p.partNumber, p.etag]));
+    const remainingPartNumbers: number[] = [];
+    for (let partNumber = 1; partNumber <= totalParts; partNumber += 1) {
+      if (!completedPartMap.has(partNumber)) {
+        remainingPartNumbers.push(partNumber);
+      }
+    }
+
+    const partSizeFor = (partNumber: number) => {
+      const start = (partNumber - 1) * session.partSize;
+      const end = Math.min(start + session.partSize, fileSize);
+      return Math.max(0, end - start);
+    };
+
+    const activePartLoaded = new Map<number, number>();
+    const activePartSpeed = new Map<number, number>();
+    const failedPartSet = new Set<number>();
+    let completedBytes = Array.from(completedPartMap.keys()).reduce((sum, partNumber) => sum + partSizeFor(partNumber), 0);
+
+    const syncTaskProgress = () => {
+      const inFlightLoaded = Array.from(activePartLoaded.values()).reduce((sum, value) => sum + value, 0);
+      const totalLoaded = Math.min(fileSize, completedBytes + inFlightLoaded);
+      const speed = Array.from(activePartSpeed.values()).reduce((sum, value) => sum + value, 0);
+      loadedBytesRef.current.set(task.id, totalLoaded);
+      speedBytesRef.current.set(task.id, speed);
+
+      updateTaskState(task.id, (item) => ({
+        ...item,
+        loadedBytes: totalLoaded,
+        totalBytes: fileSize,
+        progress: fileSize > 0 ? Math.round((totalLoaded / fileSize) * 100) : 0,
+        speedBps: speed,
+        status: 'running',
+      }));
+      updateOverallProgress();
+    };
+
+    syncTaskProgress();
+
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < remainingPartNumbers.length) {
+        const partNumber = remainingPartNumbers[cursor];
+        cursor += 1;
+
+        const start = (partNumber - 1) * session.partSize;
+        const end = Math.min(start + session.partSize, fileSize);
+        const partBlob = blob.slice(start, end);
+
+        setCurrentTaskName(`${task.name} (分片 ${partNumber}/${totalParts})`);
+        setStatus(`正在上传分片 ${partNumber}/${totalParts}`);
+
+        let success = false;
+        for (let attempt = 1; attempt <= MULTIPART_MAX_RETRIES; attempt += 1) {
+          try {
+            const signedUrl = await signMultipartPart(session, partNumber);
+            const result = await putMultipartPartWithProgress(signedUrl, partBlob, (loaded, _total, speedBps) => {
+              activePartLoaded.set(partNumber, loaded);
+              activePartSpeed.set(partNumber, speedBps);
+              syncTaskProgress();
+            });
+
+            activePartLoaded.delete(partNumber);
+            activePartSpeed.delete(partNumber);
+            completedPartMap.set(partNumber, result.etag);
+            completedBytes += partBlob.size;
+            session.completedParts = Array.from(completedPartMap.entries())
+              .map(([pn, etag]) => ({ partNumber: pn, etag }))
+              .sort((a, b) => a.partNumber - b.partNumber);
+            session.failedParts = Array.from(failedPartSet.values()).sort((a, b) => a - b);
+            saveMultipartSession(session);
+            syncTaskProgress();
+            success = true;
+            break;
+          } catch (partErr) {
+            activePartLoaded.delete(partNumber);
+            activePartSpeed.delete(partNumber);
+            syncTaskProgress();
+            if (attempt >= MULTIPART_MAX_RETRIES) {
+              failedPartSet.add(partNumber);
+            } else {
+              await sleep(getBackoffDelay(attempt));
+            }
+            if (partErr instanceof Error && partErr.message.includes('Abort')) {
+              throw partErr;
+            }
+          }
+        }
+
+        if (!success) {
+          setStatus(`分片 ${partNumber} 上传失败，等待处理`);
+        }
+      }
+    };
+
+    const workers = Array.from(
+      { length: Math.min(MULTIPART_PART_CONCURRENCY, Math.max(1, remainingPartNumbers.length)) },
+      () => worker()
+    );
+    await Promise.all(workers);
+
+    const failedParts = Array.from(failedPartSet.values()).sort((a, b) => a - b);
+    if (failedParts.length > 0) {
+      session.failedParts = failedParts;
+      session.completedParts = Array.from(completedPartMap.entries())
+        .map(([partNumber, etag]) => ({ partNumber, etag }))
+        .sort((a, b) => a.partNumber - b.partNumber);
+      saveMultipartSession(session);
+      setMultipartPending(session);
+
+      const failedError = new Error(`存在 ${failedParts.length} 个失败分片`) as MultipartFailedError;
+      failedError.code = 'MULTIPART_PARTIAL_FAILED';
+      failedError.session = session;
+      throw failedError;
+    }
+
+    session.completedParts = Array.from(completedPartMap.entries())
+      .map(([partNumber, etag]) => ({ partNumber, etag }))
+      .sort((a, b) => a.partNumber - b.partNumber);
+
+    setStatus('正在合并分片...');
+    await completeMultipartSession(session);
+    removeMultipartSession(session.fingerprint);
+    setMultipartPending(null);
+  };
+
+  const uploadToS3 = async (task: UploadTask, resumeSession?: MultipartSession) => {
+    if (task.totalBytes >= MULTIPART_THRESHOLD_BYTES) {
+      await uploadTaskWithMultipart(task, resumeSession);
+      return;
+    }
+
     const contentType = (task.blob as File).type || 'application/octet-stream';
     const presignJson = await fetchApiJson<{ url: string }>('/api/upload', {
       method: 'POST',
@@ -252,6 +629,7 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
     setCurrentTaskName('');
     setAggregateSpeed(0);
     setMinimized(false);
+    setMultipartPending(null);
 
     loadedBytesRef.current.clear();
     speedBytesRef.current.clear();
@@ -309,7 +687,8 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
       }
 
       let completed = 0;
-      const parallel = 4;
+      const hasLargeFile = tasks.some((task) => task.totalBytes >= MULTIPART_THRESHOLD_BYTES);
+      const parallel = hasLargeFile ? LARGE_FILE_CONCURRENCY : SMALL_FILE_CONCURRENCY;
 
       for (let i = 0; i < tasks.length; i += parallel) {
         const chunk = tasks.slice(i, i + parallel);
@@ -353,11 +732,92 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
       }, 1000);
     } catch (err: unknown) {
       console.error(err);
-      setError(getErrorMessage(err, '上传过程中发生错误'));
+      const multipartErr = err as Partial<MultipartFailedError>;
+      if (multipartErr.code === 'MULTIPART_PARTIAL_FAILED' && multipartErr.session) {
+        setMultipartPending(multipartErr.session);
+        setError('部分分片上传失败，你可以继续重试失败分片、保存会话稍后继续，或放弃并清理本次上传。');
+        setStatus('分片上传中断，等待你选择后续操作');
+      } else {
+        setError(getErrorMessage(err, '上传过程中发生错误'));
+        setStatus('上传失败');
+      }
       setUploading(false);
       setAggregateSpeed(0);
-      setStatus('上传失败');
       setUploadTasks((prev) => prev.map((task) => (task.status === 'running' ? { ...task, status: 'error' } : task)));
+    }
+  };
+
+  const handleRetryFailedParts = async () => {
+    if (!multipartPending) return;
+
+    const targetTask = uploadTasks.find((task) => getTaskFingerprint(task) === multipartPending.fingerprint);
+    if (!targetTask) {
+      setError('未找到对应文件，请重新选择相同文件后再继续失败分片上传。');
+      return;
+    }
+
+    setMultipartActionBusy(true);
+    setUploading(true);
+    setError('');
+    setStatus('继续重试失败分片...');
+
+    try {
+      await uploadToS3(targetTask, multipartPending);
+      loadedBytesRef.current.set(targetTask.id, targetTask.totalBytes);
+      speedBytesRef.current.set(targetTask.id, 0);
+      updateTaskState(targetTask.id, (item) => ({
+        ...item,
+        loadedBytes: item.totalBytes,
+        progress: 100,
+        speedBps: 0,
+        status: 'success',
+      }));
+      updateOverallProgress();
+      setCompletedFiles((prev) => Math.min(totalFiles, prev + 1));
+      setStatus('失败分片已补传完成');
+      setCurrentTaskName('上传完成');
+      setMultipartPending(null);
+      setAggregateSpeed(0);
+      onRefresh();
+    } catch (err: unknown) {
+      const multipartErr = err as Partial<MultipartFailedError>;
+      if (multipartErr.code === 'MULTIPART_PARTIAL_FAILED' && multipartErr.session) {
+        setMultipartPending(multipartErr.session);
+        setError('仍有分片上传失败，请继续重试、保存会话或放弃清理。');
+        setStatus('分片上传再次中断');
+      } else {
+        setError(getErrorMessage(err, '继续上传失败分片时发生错误'));
+      }
+    } finally {
+      setUploading(false);
+      setMultipartActionBusy(false);
+    }
+  };
+
+  const handleSaveMultipartSession = () => {
+    if (!multipartPending) return;
+    saveMultipartSession(multipartPending);
+    setStatus('已保存上传会话，可稍后重新选择同一文件继续');
+    setError('');
+  };
+
+  const handleAbortMultipartSession = async () => {
+    if (!multipartPending) return;
+
+    setMultipartActionBusy(true);
+    try {
+      await abortMultipartSession(multipartPending);
+      removeMultipartSession(multipartPending.fingerprint);
+      setMultipartPending(null);
+      setError('');
+      setStatus('已放弃并清理未完成分片');
+      setAggregateSpeed(0);
+      setCurrentTaskName('已取消上传');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err, '放弃上传失败，请重试'));
+    } finally {
+      setMultipartActionBusy(false);
+      setUploading(false);
     }
   };
 
@@ -587,6 +1047,44 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
             <div className="mt-4 p-3 bg-red-500/10 border border-red-500/30 rounded-xl flex items-center gap-2 text-red-400 text-xs">
               <AlertCircle size={14} className="shrink-0" />
               <span>{error}</span>
+            </div>
+          )}
+
+          {multipartPending && !uploading && (
+            <div className={`mt-4 rounded-xl border p-3 ${isMiku ? 'bg-white/70 border-slate-200' : 'bg-white/5 border-white/10'}`}>
+              <p className={`text-xs mb-3 ${isMiku ? 'text-slate-600' : 'text-white/75'}`}>
+                当前失败分片：{multipartPending.failedParts.join(', ') || '-'}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleRetryFailedParts}
+                  disabled={multipartActionBusy}
+                  className={`px-3 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-colors disabled:opacity-50 ${
+                    isMiku ? 'bg-[#39C5BB] hover:bg-[#30b3a9] text-white' : 'bg-blue-600 hover:bg-blue-500 text-white'
+                  }`}
+                >
+                  继续失败分片
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveMultipartSession}
+                  disabled={multipartActionBusy}
+                  className={`px-3 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-colors disabled:opacity-50 ${
+                    isMiku ? 'bg-slate-100 hover:bg-slate-200 text-slate-600' : 'bg-white/10 hover:bg-white/15 text-white'
+                  }`}
+                >
+                  保存会话
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAbortMultipartSession}
+                  disabled={multipartActionBusy}
+                  className="px-3 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-colors disabled:opacity-50 bg-red-500/15 hover:bg-red-500/25 text-red-400"
+                >
+                  放弃并清理
+                </button>
+              </div>
             </div>
           )}
 

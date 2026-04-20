@@ -42,6 +42,110 @@
 2. 浏览器直接 PUT 到签名 URL。
 3. 上传完成后刷新列表。
 
+## POST /api/upload/multipart
+
+分片上传控制接口（创建会话、签名分片、完成合并、中止上传、查询已上传分片）。
+
+### action=create
+
+创建分片上传会话。
+
+请求体示例：
+
+```json
+{
+  "action": "create",
+  "filename": "big-video.mp4",
+  "path": "album/",
+  "contentType": "video/mp4",
+  "size": 6442450944,
+  "partSize": 33554432
+}
+```
+
+响应示例：
+
+```json
+{
+  "success": true,
+  "data": {
+    "uploadId": "...",
+    "key": "album/big-video.mp4",
+    "partSize": 33554432
+  }
+}
+```
+
+### action=sign-part
+
+获取指定分片上传 URL。
+
+请求体示例：
+
+```json
+{
+  "action": "sign-part",
+  "uploadId": "...",
+  "key": "album/big-video.mp4",
+  "partNumber": 7
+}
+```
+
+### action=complete
+
+完成分片合并。
+
+请求体示例：
+
+```json
+{
+  "action": "complete",
+  "uploadId": "...",
+  "key": "album/big-video.mp4",
+  "parts": [
+    { "partNumber": 1, "etag": "\"etag-1\"" },
+    { "partNumber": 2, "etag": "\"etag-2\"" }
+  ]
+}
+```
+
+### action=abort
+
+放弃上传并清理未完成分片。
+
+请求体示例：
+
+```json
+{
+  "action": "abort",
+  "uploadId": "...",
+  "key": "album/big-video.mp4"
+}
+```
+
+### action=list-parts
+
+查询当前会话下已成功上传的分片。
+
+请求体示例：
+
+```json
+{
+  "action": "list-parts",
+  "uploadId": "...",
+  "key": "album/big-video.mp4"
+}
+```
+
+### 分片上传建议
+
+1. 单文件大于等于 64MB 时启用分片上传。
+2. 默认分片大小建议 32MB。
+3. 分片并发建议 3，大文件场景文件并发建议 1。
+4. 每片失败最多重试 3 次，并采用指数退避。
+5. 若全部重试后仍失败，允许用户继续失败分片或直接 abort。
+6. 对象存储 CORS 需暴露 `ETag`，否则无法 complete。
+
 ## GET /api/proxy
 
 代理拉取媒体资源，可选缩略图压缩。
