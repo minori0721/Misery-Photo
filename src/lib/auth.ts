@@ -3,6 +3,11 @@ import { NextResponse } from 'next/server';
 export const AUTH_COOKIE_NAME = 'nebula_session';
 const SESSION_EXPIRES_SECONDS = 60 * 60 * 24 * 7;
 
+function shouldUseSecureAuthCookie(): boolean {
+  const allowHttpLogin = process.env.AUTH_ALLOW_HTTP_LOGIN?.trim().toLowerCase() === 'true';
+  return process.env.NODE_ENV === 'production' && !allowHttpLogin;
+}
+
 class AuthConfigError extends Error {
   constructor(message: string) {
     super(message);
@@ -153,7 +158,7 @@ export async function requireApiAuth(request: Request): Promise<NextResponse | n
 export function buildSessionCookieOptions() {
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: shouldUseSecureAuthCookie(),
     sameSite: 'lax' as const,
     maxAge: SESSION_EXPIRES_SECONDS,
     path: '/',
@@ -163,7 +168,7 @@ export function buildSessionCookieOptions() {
 export function clearSessionCookie(response: NextResponse) {
   response.cookies.set(AUTH_COOKIE_NAME, '', {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: shouldUseSecureAuthCookie(),
     sameSite: 'lax',
     expires: new Date(0),
     path: '/',

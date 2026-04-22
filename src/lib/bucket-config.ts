@@ -4,6 +4,7 @@ import { NextResponse } from 'next/server';
 import { kvGetString, kvSetString } from '@/lib/kv-store';
 import { decryptSecret, encryptSecret } from '@/lib/secret-crypto';
 import { readCookieFromHeader } from '@/lib/auth';
+import { getErrorMessage } from '@/lib/error-utils';
 
 const MAX_BUCKETS = 5;
 const MAX_BUCKET_NAME_LENGTH = 64;
@@ -479,8 +480,8 @@ export async function testBucketConnectivity(bucketInput: BucketConfigInput) {
       })
     );
     return { ok: true, message: '连接成功' };
-  } catch (error: any) {
-    return { ok: false, message: error?.message || '连接失败' };
+  } catch (error: unknown) {
+    return { ok: false, message: getErrorMessage(error, '连接失败') };
   }
 }
 

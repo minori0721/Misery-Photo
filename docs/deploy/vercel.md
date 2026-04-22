@@ -23,6 +23,7 @@
 ADMIN_USER=用户名
 ADMIN_PASS=密码
 AUTH_SECRET=随机字符串，越长越好（变更后现有登录会话会失效）
+AUTH_ALLOW_HTTP_LOGIN=false
 BUCKET_ENCRYPTION_KEY=随机字符串，越长越好（变更后历史桶密文可能无法解密）
 BUCKET_STORE_PROVIDER=vercel
 
@@ -69,6 +70,7 @@ PROXY_ALLOWED_HOSTS=example.com,cdn.example.com
 
 - 生产环境建议使用独立域名并启用 HTTPS。
 - 如需多环境，建议 `preview` 与 `production` 分域名管理。
+- 若你临时只能用 HTTP 访问，可将 `AUTH_ALLOW_HTTP_LOGIN=true` 作为排障开关；恢复 HTTPS 后请改回 `false`。
 
 ## 4. 故障排查
 
@@ -86,3 +88,9 @@ PROXY_ALLOWED_HOSTS=example.com,cdn.example.com
 
 - 检查对象存储 endpoint 连通性与区域设置。
 - 检查 `PROXY_ALLOWED_HOSTS` 是否包含目标域名。
+
+### 4.4 登录成功但立刻回到登录页
+
+- 常见原因是 HTTP 下浏览器不接受安全会话 Cookie。
+- 优先方案：改为 HTTPS 访问。
+- 临时方案：设置 `AUTH_ALLOW_HTTP_LOGIN=true` 后重新部署。

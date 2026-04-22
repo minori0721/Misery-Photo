@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import sharp from 'sharp';
 import { requireApiAuth } from '@/lib/auth';
 import { getBucketRuntimeFromRequest, noBucketConfiguredResponse } from '@/lib/bucket-config';
+import { getErrorMessage, getErrorName } from '@/lib/error-utils';
 
 const PROXY_TIMEOUT_MS = 15000;
 
@@ -102,11 +103,11 @@ export async function GET(request: Request) {
         'Cache-Control': 'public, max-age=3600',
       },
     });
-  } catch (error: any) {
-    if (error?.name === 'AbortError') {
+  } catch (error: unknown) {
+    if (getErrorName(error) === 'AbortError') {
       return NextResponse.json({ success: false, message: '上游请求超时' }, { status: 504 });
     }
     console.error('Proxy Error:', error);
-    return NextResponse.json({ success: false, message: error.message || '代理请求失败' }, { status: 500 });
+    return NextResponse.json({ success: false, message: getErrorMessage(error, '代理请求失败') }, { status: 500 });
   }
 }

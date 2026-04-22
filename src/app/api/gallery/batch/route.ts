@@ -9,6 +9,7 @@ import {
 import { requireApiAuth } from '@/lib/auth';
 import { getPathBaseName, isValidStoragePath, toFolderPath, uniqStrings } from '@/lib/validation';
 import { getBucketRuntimeFromRequest, noBucketConfiguredResponse } from '@/lib/bucket-config';
+import { getErrorMessage } from '@/lib/error-utils';
 
 const MAX_BATCH_PATHS = 1000;
 const MAX_PATH_LENGTH = 1024;
@@ -208,10 +209,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: true, message: `已${label} ${effectiveTasks.length} 个对象到 ${targetDest || '/'}` });
     }
 
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Batch operation error:', error);
     return NextResponse.json(
-      { success: false, message: error.message || '批量操作失败' },
+      { success: false, message: getErrorMessage(error, '批量操作失败') },
       { status: 500 }
     );
   }

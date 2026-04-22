@@ -3,11 +3,9 @@
 import { useState, useEffect, useCallback, Suspense, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Folder,
-  Image as ImageIcon,
-  PlayCircle,
   ChevronLeft,
   ChevronRight,
+  PlayCircle,
   Upload,
   Download,
   LogOut,
@@ -19,21 +17,21 @@ import {
   ArrowUp,
   Settings2,
   CheckSquare,
-  Square,
   Scissors,
   Copy,
   CheckCircle2,
   XCircle,
   AlertCircle,
   X as XIcon,
+  Minimize2,
 } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import UploadModal from '@/components/UploadModal';
 import SettingsModal from '@/components/SettingsModal';
 import TargetPickerModal from '@/components/TargetPickerModal';
 import VideoPlayerModal from '@/components/VideoPlayerModal';
-import JSZip from 'jszip';
 import { useSettings, ISettings } from '@/lib/useSettings';
+import { getErrorCode, getErrorMessage, getErrorName, isRecord } from '@/lib/error-utils';
 
 // Toast 消息类型
 type Toast = { id: number; message: string; type: 'info' | 'success' | 'error' };
@@ -52,6 +50,47 @@ type GalleryFile = {
 };
 type GalleryData = { folders: GalleryFolder[]; files: GalleryFile[]; currentPath: string };
 type FileToDownload = { name: string; url: string; zipPath: string };
+type ApiBaseResponse = { success: boolean; message?: string; code?: string };
+type SignGetObjectsResponse = ApiBaseResponse & { data?: Record<string, string> };
+type SignerListResponse = ApiBaseResponse & {
+  data?: {
+    currentPath: string;
+    listUrl: string;
+  };
+};
+type BatchActionResponse = ApiBaseResponse;
+type DeleteActionResponse = ApiBaseResponse;
+type DownloadTask = {
+  id: string;
+  name: string;
+  loadedBytes: number;
+  totalBytes: number;
+  progress: number;
+  speedBps: number;
+  status: 'queued' | 'running' | 'success' | 'error';
+};
+
+const KB = 1024;
+const MB = 1024 * 1024;
+
+function formatTransferSpeed(speedBps: number): string {
+  if (!Number.isFinite(speedBps) || speedBps <= 0) return '0.0 KB/s';
+  if (speedBps >= MB) return `${(speedBps / MB).toFixed(2)} MB/s`;
+  return `${(speedBps / KB).toFixed(1)} KB/s`;
+}
+
+function formatTransferSize(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) return '0.0 KB';
+  if (size >= MB) return `${(size / MB).toFixed(2)} MB`;
+  return `${(size / KB).toFixed(1)} KB`;
+}
+
+function getProgressRingDash(progress: number, radius = 22): string {
+  const normalized = Math.max(0, Math.min(progress, 100));
+  const circumference = 2 * Math.PI * radius;
+  const filled = (normalized / 100) * circumference;
+  return `${filled} ${circumference - filled}`;
+}
 
 const IMAGE_EXT_RE = /\.(jpg|jpeg|png|webp|gif)$/i;
 const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v|m3u8)$/i;
@@ -128,6 +167,13 @@ function GalleryContent() {
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadMinimized, setDownloadMinimized] = useState(false);
+  const [downloadCurrentFile, setDownloadCurrentFile] = useState('');
+  const [downloadCurrentFileProgress, setDownloadCurrentFileProgress] = useState(0);
+  const [downloadCompletedFiles, setDownloadCompletedFiles] = useState(0);
+  const [downloadTotalFiles, setDownloadTotalFiles] = useState(0);
+  const [downloadSpeedBps, setDownloadSpeedBps] = useState(0);
+  const [downloadTasks, setDownloadTasks] = useState<DownloadTask[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -144,6 +190,7 @@ function GalleryContent() {
   const previewInFlightRef = useRef<Map<string, Promise<string[]>>>(new Map());
   const previewActiveCountRef = useRef(0);
   const previewWaitersRef = useRef<Array<() => void>>([]);
+  const downloadSpeedRef = useRef<Map<string, number>>(new Map());
 
   // 多选模式
   const [selectionMode, setSelectionMode] = useState(false);
@@ -163,20 +210,25 @@ function GalleryContent() {
     router.push('/login');
   }, [addToast, router]);
 
-  const fetchApiJson = useCallback(async <T = any>(input: RequestInfo | URL, init?: RequestInit): Promise<T> => {
+  const fetchApiJson = useCallback(async <T,>(input: RequestInfo | URL, init?: RequestInit): Promise<T> => {
     const res = await fetch(input, init);
     const contentType = res.headers.get('content-type') || '';
     const isJson = contentType.includes('application/json');
-    const payload = isJson ? await res.json() : null;
+    const payload = isJson ? (await res.json()) as unknown : null;
+    const payloadRecord = isRecord(payload) ? payload : undefined;
 
     if (res.status === 401) {
-      handleAuthExpired(payload?.message);
+      const authMsg = typeof payloadRecord?.message === 'string' ? payloadRecord.message : undefined;
+      handleAuthExpired(authMsg);
       throw new Error('UNAUTHORIZED');
     }
 
     if (!res.ok) {
-      const err = new Error(payload?.message || `请求失败（${res.status}）`) as Error & { code?: string };
-      err.code = payload?.code;
+      const errMsg = typeof payloadRecord?.message === 'string' ? payloadRecord.message : `请求失败（${res.status}）`;
+      const err = new Error(errMsg) as Error & { code?: string };
+      if (typeof payloadRecord?.code === 'string') {
+        err.code = payloadRecord.code;
+      }
       throw err;
     }
 
@@ -228,7 +280,7 @@ function GalleryContent() {
         const idx = cursor;
         cursor += 1;
         const chunkKeys = chunks[idx];
-        const signJson = await fetchApiJson<any>('/api/gallery', {
+        const signJson = await fetchApiJson<SignGetObjectsResponse>('/api/gallery', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'sign-get-objects', keys: chunkKeys }),
@@ -247,7 +299,7 @@ function GalleryContent() {
   }, [fetchApiJson]);
 
   // 获取文件列表（Signer Mode）：后端仅签名，前端直连 S3 拉 XML 并解析
-  const fetchGallery = async (path: string) => {
+  const fetchGallery = useCallback(async (path: string) => {
     const reqId = ++galleryReqIdRef.current;
     galleryAbortRef.current?.abort();
     const controller = new AbortController();
@@ -264,9 +316,13 @@ function GalleryContent() {
 
       do {
         const tokenPart = continuationToken ? `&continuationToken=${encodeURIComponent(continuationToken)}` : '';
-        const signerJson = await fetchApiJson<any>(`/api/gallery?path=${encodeURIComponent(path)}${tokenPart}`, { signal });
+        const signerJson = await fetchApiJson<SignerListResponse>(`/api/gallery?path=${encodeURIComponent(path)}${tokenPart}`, { signal });
         if (!signerJson.success) {
           throw new Error(signerJson.message || '获取列表签名失败');
+        }
+
+        if (!signerJson.data?.listUrl) {
+          throw new Error('列表签名响应缺少 listUrl');
         }
 
         const listRes = await fetch(signerJson.data.listUrl, { signal });
@@ -307,10 +363,10 @@ function GalleryContent() {
         setData({ folders, files, currentPath: path });
       }
     } catch (err: unknown) {
-      if ((err as { name?: string })?.name === 'AbortError') {
+      if (getErrorName(err) === 'AbortError') {
         return;
       }
-      const errCode = (err as { code?: string })?.code;
+      const errCode = getErrorCode(err);
       if (errCode === 'NO_BUCKET_CONFIG') {
         if (reqId === galleryReqIdRef.current) {
           setNoBucketConfigured(true);
@@ -319,7 +375,7 @@ function GalleryContent() {
         }
         return;
       }
-      const msg = err instanceof Error ? err.message : '获取数据失败';
+      const msg = getErrorMessage(err, '获取数据失败');
       if (reqId === galleryReqIdRef.current) {
         setError(msg);
       }
@@ -328,7 +384,7 @@ function GalleryContent() {
         setLoading(false);
       }
     }
-  };
+  }, [fetchApiJson, signObjectUrlsInPool]);
 
   // 文件夹缩略图也走直连：前端自己拿签名列表 + 解析 + 批量签图
   const fetchFolderPreviewDirect = useCallback(async (path: string): Promise<string[]> => {
@@ -341,24 +397,23 @@ function GalleryContent() {
     const run = (async () => {
       await acquirePreviewSlot();
       try {
-        const signerJson = await fetchApiJson<any>(`/api/gallery?path=${encodeURIComponent(path)}&maxKeys=12`);
+        const signerJson = await fetchApiJson<SignerListResponse>(`/api/gallery?path=${encodeURIComponent(path)}&maxKeys=12`);
         if (!signerJson.success) return [];
+
+        if (!signerJson.data?.listUrl) return [];
 
         const listRes = await fetch(signerJson.data.listUrl);
         if (!listRes.ok) return [];
 
         const xmlText = await listRes.text();
         const parsed = parseS3ListXml(xmlText, path);
-        const previewKeys = parsed.filesMeta
-          .filter((m) => m.mediaType === 'image')
-          .map((m) => m.key)
-          .slice(0, 3);
+        const previewKeys = parsed.filesMeta.map((m) => m.key).slice(0, 3);
         if (previewKeys.length === 0) {
           previewCacheRef.current.set(path, []);
           return [];
         }
 
-        const signJson = await fetchApiJson<any>('/api/gallery', {
+        const signJson = await fetchApiJson<SignGetObjectsResponse>('/api/gallery', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'sign-get-objects', keys: previewKeys }),
@@ -376,12 +431,12 @@ function GalleryContent() {
 
     previewInFlightRef.current.set(path, run);
     return run;
-  }, [acquirePreviewSlot, releasePreviewSlot]);
+  }, [acquirePreviewSlot, releasePreviewSlot, fetchApiJson]);
 
   useEffect(() => {
     fetchGallery(currentPath);
     setViewMode(currentPath ? 'manga' : 'grid');
-  }, [currentPath, bucketRefreshTick]);
+  }, [currentPath, bucketRefreshTick, fetchGallery]);
 
   useEffect(() => {
     return () => {
@@ -406,13 +461,14 @@ function GalleryContent() {
     setActiveVideoFile(null);
   }, []);
 
+  const imageFiles = data.files.filter((file) => file.type === 'image');
+
   const openLightboxByPath = useCallback((path: string) => {
-    const imageFiles = data.files.filter((file) => file.type === 'image');
     const index = imageFiles.findIndex((file) => file.path === path);
     if (index >= 0) {
       setLightboxIndex(index);
     }
-  }, [data.files]);
+  }, [imageFiles]);
 
   const openVideoModalByPath = useCallback((path: string) => {
     const target = data.files.find((file) => file.path === path && file.type === 'video') || null;
@@ -420,22 +476,20 @@ function GalleryContent() {
   }, [data.files]);
 
   const showPrevLightbox = useCallback(() => {
-    const imageFiles = data.files.filter((file) => file.type === 'image');
     if (!imageFiles.length) return;
     setLightboxIndex((prev) => {
       if (prev === null) return 0;
       return (prev - 1 + imageFiles.length) % imageFiles.length;
     });
-  }, [data.files]);
+  }, [imageFiles.length]);
 
   const showNextLightbox = useCallback(() => {
-    const imageFiles = data.files.filter((file) => file.type === 'image');
     if (!imageFiles.length) return;
     setLightboxIndex((prev) => {
       if (prev === null) return 0;
       return (prev + 1) % imageFiles.length;
     });
-  }, [data.files]);
+  }, [imageFiles.length]);
 
   useEffect(() => {
     if (lightboxIndex === null) return;
@@ -455,26 +509,22 @@ function GalleryContent() {
     router.push(`/?path=${encodeURIComponent(folderPath)}`);
   };
 
-  // 处理返回上级
-  const handleGoBack = () => {
-    const parts = currentPath.split('/').filter(Boolean);
-    parts.pop();
-    const newPath = parts.length > 0 ? parts.join('/') + '/' : '';
-    router.push(`/?path=${encodeURIComponent(newPath)}`);
-  };
-
   // 多选 helpers
   const toggleSelection = (key: string) => {
     setSelectedItems(prev => {
       const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
       return next;
     });
   };
   const toggleSelectAll = () => {
     const allKeys = [
-      ...data.folders.map((f: any) => f.path),
-      ...data.files.map((f: any) => f.path),
+      ...data.folders.map((f) => f.path),
+      ...data.files.map((f) => f.path),
     ];
     if (selectedItems.size === allKeys.length) {
       setSelectedItems(new Set());
@@ -487,12 +537,73 @@ function GalleryContent() {
     setSelectedItems(new Set());
   };
 
+  const updateDownloadTask = useCallback((id: string, patch: Partial<DownloadTask>) => {
+    setDownloadTasks((prev) => prev.map((task) => (task.id === id ? { ...task, ...patch } : task)));
+  }, []);
+
+  const syncDownloadSpeedSum = useCallback(() => {
+    const sum = Array.from(downloadSpeedRef.current.values()).reduce((acc, val) => acc + val, 0);
+    setDownloadSpeedBps(sum);
+  }, []);
+
+  const fetchBlobWithProgress = useCallback(async (
+    url: string,
+    signal: AbortSignal,
+    onProgress: (loaded: number, total: number, speedBps: number) => void
+  ): Promise<Blob> => {
+    const res = await fetch(url, { signal });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    if (!res.body) {
+      const fallbackBlob = await res.blob();
+      onProgress(fallbackBlob.size, fallbackBlob.size, 0);
+      return fallbackBlob;
+    }
+
+    const total = Number(res.headers.get('content-length') || '0');
+    const reader = res.body.getReader();
+    const chunks: BlobPart[] = [];
+    let loaded = 0;
+    let lastLoaded = 0;
+    let lastTs = Date.now();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        const copy = new Uint8Array(value.byteLength);
+        copy.set(value);
+        chunks.push(copy);
+        loaded += value.length;
+        const now = Date.now();
+        const deltaTime = Math.max(1, now - lastTs) / 1000;
+        const deltaBytes = Math.max(0, loaded - lastLoaded);
+        const speedBps = deltaBytes / deltaTime;
+        lastLoaded = loaded;
+        lastTs = now;
+        onProgress(loaded, total || loaded, speedBps);
+      }
+    }
+
+    return new Blob(chunks);
+  }, []);
+
   // 取消下载
   const cancelDownload = () => {
     if (activeAbortController) {
       activeAbortController.abort();
       setActiveAbortController(null);
       setDownloading(false);
+      setDownloadMinimized(false);
+      setDownloadSpeedBps(0);
+      setDownloadCurrentFile('');
+      setDownloadCurrentFileProgress(0);
+      setDownloadCompletedFiles(0);
+      setDownloadTotalFiles(0);
+      setDownloadTasks([]);
+      downloadSpeedRef.current.clear();
       addToast('下载已取消', 'info');
     }
   };
@@ -508,9 +619,13 @@ function GalleryContent() {
 
       do {
         const tokenPart = continuationToken ? `&continuationToken=${encodeURIComponent(continuationToken)}` : '';
-        const signerJson = await fetchApiJson<any>(`/api/gallery?path=${encodeURIComponent(walkPath)}${tokenPart}`, { signal });
+        const signerJson = await fetchApiJson<SignerListResponse>(`/api/gallery?path=${encodeURIComponent(walkPath)}${tokenPart}`, { signal });
         if (!signerJson.success) {
           throw new Error(signerJson.message || '获取下载列表签名失败');
+        }
+
+        if (!signerJson.data?.listUrl) {
+          throw new Error('下载列表签名响应缺少 listUrl');
         }
 
         const listRes = await fetch(signerJson.data.listUrl, { signal });
@@ -544,25 +659,34 @@ function GalleryContent() {
         };
       })
       .filter((f): f is FileToDownload => Boolean(f));
-  }, [signObjectUrlsInPool]);
+  }, [signObjectUrlsInPool, fetchApiJson]);
 
   // 智能下载：支持子目录结构感知 + 可选只下载选中项
   const handleDownloadZip = async (options?: { files?: GalleryFile[]; folders?: GalleryFolder[]; zipName?: string }) => {
     const controller = new AbortController();
     setActiveAbortController(controller);
     setDownloading(true);
+    setDownloadMinimized(false);
     setDownloadProgress(0);
+    setDownloadCurrentFile('');
+    setDownloadCurrentFileProgress(0);
+    setDownloadCompletedFiles(0);
+    setDownloadTotalFiles(0);
+    setDownloadSpeedBps(0);
+    setDownloadTasks([]);
+    downloadSpeedRef.current.clear();
     
     // 如果是多选触发，立即退出多选模式
     if (options?.files || options?.folders) {
       exitSelectionMode();
     }
 
-    const zip = new JSZip();
     const folderName = options?.zipName || currentPath.split('/').filter(Boolean).pop() || 'gallery-export';
 
     try {
       const signal = controller.signal;
+      const { default: JSZip } = await import('jszip');
+      const zip = new JSZip();
 
       // 若当前路径下有子画集，递归获取结构
       const hasSubFolders = data.folders.length > 0 && !options?.files && !options?.folders;
@@ -589,28 +713,90 @@ function GalleryContent() {
 
       if (filesToDownload.length === 0) { 
         setDownloading(false); 
+        setDownloadMinimized(false);
+        setDownloadCurrentFile('');
+        setDownloadCurrentFileProgress(0);
+        setDownloadCompletedFiles(0);
+        setDownloadTotalFiles(0);
+        setDownloadSpeedBps(0);
+        setDownloadTasks([]);
+        downloadSpeedRef.current.clear();
         setActiveAbortController(null);
         return; 
       }
 
       let completed = 0;
       const total = filesToDownload.length;
+      setDownloadTotalFiles(total);
+
+      const initialTasks: DownloadTask[] = filesToDownload.map((file, index) => ({
+        id: `${Date.now()}-${index}-${file.name}`,
+        name: file.zipPath || file.name,
+        loadedBytes: 0,
+        totalBytes: 0,
+        progress: 0,
+        speedBps: 0,
+        status: 'queued',
+      }));
+      setDownloadTasks(initialTasks);
+
+      const fileIndexMap = new Map<string, string>();
+      initialTasks.forEach((task, index) => {
+        fileIndexMap.set(filesToDownload[index]?.zipPath || filesToDownload[index]?.name || task.name, task.id);
+      });
       
       // 并发下载逻辑 (v0.6.0 支持 AbortSignal)
       for (let i = 0; i < filesToDownload.length; i += 5) {
         if (signal.aborted) break;
         const chunk = filesToDownload.slice(i, i + 5);
         await Promise.all(chunk.map(async (file) => {
+          const taskId = fileIndexMap.get(file.zipPath || file.name);
           try {
-            const res = await fetch(file.url, { signal });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const blob = await res.blob();
+            if (taskId) {
+              updateDownloadTask(taskId, { status: 'running' });
+            }
+            setDownloadCurrentFile(file.name);
+
+            const blob = await fetchBlobWithProgress(file.url, signal, (loaded, totalBytes, speedBps) => {
+              if (!taskId) return;
+              const fileProgress = totalBytes > 0 ? Math.round((loaded / totalBytes) * 100) : 0;
+              updateDownloadTask(taskId, {
+                loadedBytes: loaded,
+                totalBytes,
+                progress: fileProgress,
+                speedBps,
+                status: 'running',
+              });
+              downloadSpeedRef.current.set(taskId, speedBps);
+              syncDownloadSpeedSum();
+              setDownloadCurrentFileProgress(fileProgress);
+            });
+
             zip.file(file.zipPath, blob);
             completed++;
+            setDownloadCompletedFiles(completed);
             setDownloadProgress(Math.round((completed / total) * 100));
-          } catch (err: any) {
-            if (err.name === 'AbortError') throw err;
+            setDownloadCurrentFileProgress(100);
+
+            if (taskId) {
+              downloadSpeedRef.current.set(taskId, 0);
+              updateDownloadTask(taskId, {
+                loadedBytes: blob.size,
+                totalBytes: blob.size,
+                progress: 100,
+                speedBps: 0,
+                status: 'success',
+              });
+              syncDownloadSpeedSum();
+            }
+          } catch (err: unknown) {
+            if (getErrorName(err) === 'AbortError') throw err;
             console.error(`Failed to download ${file.name}`, err);
+            if (taskId) {
+              downloadSpeedRef.current.set(taskId, 0);
+              updateDownloadTask(taskId, { status: 'error', speedBps: 0 });
+              syncDownloadSpeedSum();
+            }
           }
         }));
       }
@@ -626,8 +812,8 @@ function GalleryContent() {
       link.click();
       setTimeout(() => URL.revokeObjectURL(objectUrl), 30_000);
       addToast('打包下载成功', 'success');
-    } catch (err: any) {
-      if (err.name === 'AbortError') {
+    } catch (err: unknown) {
+      if (getErrorName(err) === 'AbortError') {
         console.log('Download aborted by user');
       } else {
         console.error('Download error:', err);
@@ -636,6 +822,14 @@ function GalleryContent() {
     } finally {
       setDownloading(false);
       setDownloadProgress(0);
+      setDownloadMinimized(false);
+      setDownloadCurrentFile('');
+      setDownloadCurrentFileProgress(0);
+      setDownloadCompletedFiles(0);
+      setDownloadTotalFiles(0);
+      setDownloadSpeedBps(0);
+      setDownloadTasks([]);
+      downloadSpeedRef.current.clear();
       setActiveAbortController(null);
     }
   };
@@ -676,7 +870,7 @@ function GalleryContent() {
     setPendingAction(null);
     exitSelectionMode();
     try {
-      const json = await fetchApiJson<any>('/api/gallery/batch', {
+      const json = await fetchApiJson<BatchActionResponse>('/api/gallery/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, paths, dest: dest ? `${dest}` : '' }),
@@ -703,11 +897,11 @@ function GalleryContent() {
   };
 
   const handleDelete = async (path: string, type: 'image' | 'video' | 'folder') => {
-    const confirmMsg = type === 'folder' ? '⚠ 警告：这将导致该画集及其中所有数据永久删除！确认吗？' : '确认删除这个文件吗？';
+    const confirmMsg = type === 'folder' ? '⚠ 警告：这将导致该画集及其中所有数据永久删除！确认吗？' : '确认删除这张照片吗？';
     if (!confirm(confirmMsg)) return;
 
     try {
-      const json = await fetchApiJson<any>('/api/gallery/delete', {
+      const json = await fetchApiJson<DeleteActionResponse>('/api/gallery/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path, type: type === 'folder' ? 'folder' : 'image' }),
@@ -717,15 +911,14 @@ function GalleryContent() {
       } else {
         alert(json.message);
       }
-    } catch (err) {
+    } catch {
       alert('操作失败');
     }
   };
 
   if (!mounted) return null;
 
-  const allKeys = [...data.folders.map((f: any) => f.path), ...data.files.map((f: any) => f.path)];
-  const imageFiles = data.files.filter((file) => file.type === 'image');
+  const allKeys = [...data.folders.map((f) => f.path), ...data.files.map((f) => f.path)];
   const activeLightboxFile = lightboxIndex !== null ? imageFiles[lightboxIndex] : null;
 
   return (
@@ -771,6 +964,13 @@ function GalleryContent() {
         onRefresh={() => fetchGallery(currentPath)}
       />
 
+      <VideoPlayerModal
+        isOpen={Boolean(activeVideoFile)}
+        onClose={closeVideoModal}
+        url={activeVideoFile?.url || ''}
+        title={activeVideoFile?.name || ''}
+      />
+
       <TargetPickerModal
         isOpen={pendingAction !== null}
         onClose={() => setPendingAction(null)}
@@ -780,59 +980,142 @@ function GalleryContent() {
         currentPath={currentPath}
       />
 
-      <VideoPlayerModal
-        isOpen={Boolean(activeVideoFile)}
-        onClose={closeVideoModal}
-        url={activeVideoFile?.url || ''}
-        title={activeVideoFile?.name || ''}
-      />
-
-      {/* 下载进度条 - v0.6.0 重构支持取消与主题适配 */}
+      {/* 下载传输中心：支持收起为圆形悬浮窗 */}
       <AnimatePresence>
-        {downloading && (
+        {downloading && !downloadMinimized && (
           <motion.div
-            initial={{ y: 100, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 100, opacity: 0 }}
-            className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[100] w-full max-w-sm"
+            initial={{ y: 28, opacity: 0, scale: 0.96 }}
+            animate={{ y: 0, opacity: 1, scale: 1 }}
+            exit={{ y: 28, opacity: 0, scale: 0.96 }}
+            transition={{ type: 'spring', stiffness: 230, damping: 22 }}
+            className="fixed bottom-6 right-6 z-[120] w-[92vw] max-w-md"
           >
-            <div className={`mx-4 border backdrop-blur-3xl p-4 rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.3)] flex items-center space-x-4 ${
-              settings.theme === 'miku' ? 'bg-white/90 border-[#39C5BB]/20' : 'bg-[#111]/90 border-white/10'
+            <div className={`border backdrop-blur-3xl rounded-3xl shadow-[0_20px_60px_rgba(0,0,0,0.35)] overflow-hidden ${
+              settings.theme === 'miku' ? 'bg-white/80 border-[#39C5BB]/25' : 'bg-[#111]/75 border-white/15'
             }`}>
-              <div className={`w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 ${
-                settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-purple-500/10 text-purple-500'
-              }`}>
-                <Loader2 className="w-5 h-5 animate-spin" />
-              </div>
-              
-              <div className="flex-1">
-                <div className="flex justify-between items-end mb-1.5">
-                  <p className={`text-[10px] uppercase tracking-widest font-black ${
-                    settings.theme === 'miku' ? 'text-slate-400' : 'text-white/40'
-                  }`}>正在下载图集...</p>
-                  <span className={`text-xs font-bold font-mono ${
-                    settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-white'
-                  }`}>{downloadProgress}%</span>
+              <div className={`px-4 py-3 border-b flex items-center justify-between ${settings.theme === 'miku' ? 'border-[#39C5BB]/15' : 'border-white/10'}`}>
+                <div className="flex items-center gap-2">
+                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${settings.theme === 'miku' ? 'bg-[#39C5BB]/10 text-[#39C5BB]' : 'bg-blue-500/15 text-blue-400'}`}>
+                    <Download size={15} />
+                  </div>
+                  <div>
+                    <p className={`text-xs font-black uppercase tracking-widest ${settings.theme === 'miku' ? 'text-slate-600' : 'text-white/80'}`}>下载传输中心</p>
+                    <p className={`text-[11px] ${settings.theme === 'miku' ? 'text-slate-500' : 'text-white/45'}`}>{downloadCompletedFiles}/{downloadTotalFiles} 文件</p>
+                  </div>
                 </div>
-                <div className={`h-1.5 w-full rounded-full overflow-hidden ${
-                  settings.theme === 'miku' ? 'bg-slate-100' : 'bg-white/5'
-                }`}>
-                  <motion.div 
-                    initial={{ width: 0 }} 
-                    animate={{ width: `${downloadProgress}%` }} 
-                    className={`h-full ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-gradient-to-r from-purple-600 to-blue-600'}`} 
-                  />
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setDownloadMinimized(true)}
+                    className={`p-1.5 rounded-lg transition-colors ${settings.theme === 'miku' ? 'text-slate-500 hover:bg-slate-100' : 'text-white/60 hover:bg-white/10'}`}
+                    title="收起"
+                  >
+                    <Minimize2 size={14} />
+                  </button>
+                  <button
+                    onClick={cancelDownload}
+                    className={`p-1.5 rounded-lg transition-colors ${settings.theme === 'miku' ? 'text-slate-500 hover:bg-red-50 hover:text-red-500' : 'text-white/60 hover:bg-red-500/10 hover:text-red-400'}`}
+                    title="取消下载"
+                  >
+                    <XIcon size={14} />
+                  </button>
                 </div>
               </div>
 
-              <button 
-                onClick={cancelDownload}
-                className={`p-2 rounded-xl transition-all hover:scale-110 active:scale-95 ${
-                  settings.theme === 'miku' ? 'bg-slate-100 hover:bg-red-50 text-slate-400 hover:text-red-500' : 'bg-white/5 hover:bg-red-500/10 text-white/30 hover:text-red-400'
-                }`}
-              >
-                <XIcon size={16} />
-              </button>
+              <div className="p-4 space-y-3">
+                <div>
+                  <div className="flex items-end justify-between mb-1.5">
+                    <p className={`text-[11px] uppercase tracking-widest font-black ${settings.theme === 'miku' ? 'text-slate-500' : 'text-white/50'}`}>总体进度</p>
+                    <span className={`text-sm font-black ${settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-blue-400'}`}>{downloadProgress}%</span>
+                  </div>
+                  <div className={`h-2 w-full rounded-full overflow-hidden ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`}>
+                    <motion.div
+                      initial={{ width: 0 }}
+                      animate={{ width: `${downloadProgress}%` }}
+                      className={`h-full ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-gradient-to-r from-blue-500 to-cyan-400'}`}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-2 text-xs">
+                  <div>
+                    <p className={settings.theme === 'miku' ? 'text-slate-400' : 'text-white/45'}>当前处理文件</p>
+                    <p className={`font-bold truncate ${settings.theme === 'miku' ? 'text-slate-700' : 'text-white/85'}`}>{downloadCurrentFile || '-'}</p>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className={settings.theme === 'miku' ? 'text-slate-400' : 'text-white/45'}>单文件进度</span>
+                    <span className={`font-bold ${settings.theme === 'miku' ? 'text-slate-700' : 'text-white/85'}`}>{downloadCurrentFileProgress}%</span>
+                  </div>
+                  <div className={`h-1.5 rounded-full overflow-hidden ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`}>
+                    <motion.div
+                      initial={{ width: 0 }}
+                      animate={{ width: `${downloadCurrentFileProgress}%` }}
+                      className={`h-full ${settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-gradient-to-r from-blue-500 to-cyan-400'}`}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className={settings.theme === 'miku' ? 'text-slate-400' : 'text-white/45'}>当前速度</span>
+                    <span className={`font-bold ${settings.theme === 'miku' ? 'text-slate-700' : 'text-white/85'}`}>{formatTransferSpeed(downloadSpeedBps)}</span>
+                  </div>
+                </div>
+
+                <div className="max-h-44 overflow-y-auto pr-1 space-y-2">
+                  {downloadTasks.map((task) => (
+                    <div key={task.id} className={`rounded-xl border px-3 py-2.5 ${settings.theme === 'miku' ? 'bg-white/70 border-slate-200' : 'bg-white/5 border-white/10'}`}>
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <p className={`text-[11px] font-bold truncate ${settings.theme === 'miku' ? 'text-slate-700' : 'text-white/85'}`}>{task.name}</p>
+                        <span className={`text-[11px] font-black ${settings.theme === 'miku' ? 'text-[#39C5BB]' : 'text-blue-400'}`}>{task.progress}%</span>
+                      </div>
+                      <div className={`h-1.5 rounded-full overflow-hidden ${settings.theme === 'miku' ? 'bg-slate-200' : 'bg-white/10'}`}>
+                        <motion.div
+                          initial={{ width: 0 }}
+                          animate={{ width: `${task.progress}%` }}
+                          className={`h-full ${task.status === 'error' ? 'bg-red-500' : settings.theme === 'miku' ? 'bg-[#39C5BB]' : 'bg-gradient-to-r from-blue-500 to-cyan-400'}`}
+                        />
+                      </div>
+                      <div className="mt-1 flex items-center justify-between text-[10px]">
+                        <span className={settings.theme === 'miku' ? 'text-slate-500' : 'text-white/45'}>{formatTransferSize(task.loadedBytes)} / {formatTransferSize(task.totalBytes)}</span>
+                        <span className={settings.theme === 'miku' ? 'text-slate-500' : 'text-white/45'}>{task.status === 'success' ? '完成' : task.status === 'error' ? '失败' : formatTransferSpeed(task.speedBps)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {downloading && downloadMinimized && (
+          <motion.button
+            initial={{ opacity: 0, scale: 0.85, y: 14 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.85, y: 14 }}
+            onClick={() => setDownloadMinimized(false)}
+            className={`fixed bottom-8 left-8 z-[121] h-16 w-16 rounded-full border backdrop-blur-2xl shadow-2xl flex items-center justify-center ${
+              settings.theme === 'miku' ? 'bg-white/70 border-[#39C5BB]/30 text-[#39C5BB]' : 'bg-white/10 border-white/20 text-white'
+            }`}
+            title="展开下载面板"
+          >
+            <svg viewBox="0 0 56 56" className="absolute inset-1.5">
+              <circle cx="28" cy="28" r="22" fill="none" stroke={settings.theme === 'miku' ? 'rgba(57,197,187,0.2)' : 'rgba(255,255,255,0.2)'} strokeWidth="4" />
+              <motion.circle
+                cx="28"
+                cy="28"
+                r="22"
+                fill="none"
+                stroke={settings.theme === 'miku' ? '#39C5BB' : '#60a5fa'}
+                strokeWidth="4"
+                strokeLinecap="round"
+                strokeDasharray={getProgressRingDash(downloadProgress)}
+                transform="rotate(-90 28 28)"
+              />
+            </svg>
+            <div className="relative flex flex-col items-center justify-center leading-none">
+              <Download size={16} />
+              <span className="text-[9px] font-black mt-0.5">{downloadProgress}%</span>
+            </div>
+          </motion.button>
         )}
       </AnimatePresence>
 
@@ -868,7 +1151,7 @@ function GalleryContent() {
               <XIcon size={20} />
             </button>
 
-            {imageFiles.length > 1 && (
+            {data.files.length > 1 && (
               <>
                 <button
                   onClick={(e) => { e.stopPropagation(); showPrevLightbox(); }}
@@ -1044,7 +1327,7 @@ function GalleryContent() {
               )}
 
               {/* 文件夹显示区域 (v0.5.0: 已取消预览数量限制) */}
-              {!error && viewMode === 'grid' && data.folders.map((folder: any) => (
+              {!error && viewMode === 'grid' && data.folders.map((folder) => (
                 <FolderCard
                   key={folder.path}
                   folder={folder}
@@ -1058,7 +1341,7 @@ function GalleryContent() {
               ))}
 
               {/* 文件显示区域 */}
-              {!error && data.files.map((file: any) => (
+              {!error && data.files.map((file) => (
                 <motion.div
                   key={file.path}
                   variants={itemVariants}
@@ -1068,12 +1351,12 @@ function GalleryContent() {
                       toggleSelection(file.path);
                       return;
                     }
-                    if (file.type === 'video') {
-                      openVideoModalByPath(file.path);
-                      return;
-                    }
                     if (viewMode === 'grid') {
-                      openLightboxByPath(file.path);
+                      if (file.type === 'video') {
+                        openVideoModalByPath(file.path);
+                      } else {
+                        openLightboxByPath(file.path);
+                      }
                     }
                   }}
                   className={viewMode === 'grid' ?
@@ -1127,8 +1410,8 @@ function GalleryContent() {
                         alt={file.name}
                         loading="lazy"
                         className={viewMode === 'grid'
-                          ? 'w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium relative z-10 cursor-zoom-in'
-                          : 'w-full h-auto select-none relative z-10'}
+                          ? "w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 font-medium relative z-10 cursor-zoom-in"
+                          : "w-full h-auto select-none relative z-10"}
                         onLoad={(e) => {
                           const target = e.target as HTMLImageElement;
                           target.parentElement?.style.setProperty('min-height', 'auto');
@@ -1142,7 +1425,7 @@ function GalleryContent() {
                     {viewMode === 'grid' && (
                       <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-all flex flex-col justify-between p-4 z-20">
                         <div className="flex justify-end">
-                          <button onClick={(e) => { e.stopPropagation(); handleDelete(file.path, file.type); }} className="p-2 bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-all shadow-xl">
+                          <button onClick={(e) => { e.stopPropagation(); handleDelete(file.path, 'image'); }} className="p-2 bg-red-500/20 text-red-500 hover:bg-red-500 hover:text-white rounded-xl transition-all shadow-xl">
                             <Trash2 size={16} />
                           </button>
                         </div>
@@ -1153,7 +1436,7 @@ function GalleryContent() {
                     {/* 漫画模式下的悬停管理 */}
                     {viewMode === 'manga' && (
                       <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity z-20">
-                        <button onClick={(e) => { e.stopPropagation(); handleDelete(file.path, file.type); }} className="p-3 bg-black/60 backdrop-blur-md rounded-full text-red-500 border border-white/10 shadow-2xl">
+                        <button onClick={() => handleDelete(file.path, 'image')} className="p-3 bg-black/60 backdrop-blur-md rounded-full text-red-500 border border-white/10 shadow-2xl">
                           <Trash2 size={24} />
                         </button>
                       </div>
@@ -1260,7 +1543,7 @@ export default function GalleryPage() {
 
 // 文件夹卡片组件：v0.5.0 重构支持异步封面加载
 function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSelected, fetchPreviewUrls }: {
-  folder: any; onClick: () => void; onDelete: () => void; settings: ISettings;
+  folder: GalleryFolder; onClick: () => void; onDelete: () => void; settings: ISettings;
   selectionMode?: boolean; isSelected?: boolean;
   fetchPreviewUrls: (path: string) => Promise<string[]>;
 }) {
@@ -1338,13 +1621,16 @@ function FolderCard({ folder, onClick, onDelete, settings, selectionMode, isSele
               initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               transition={{ duration: 0.8 }}
               className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-[3s]"
-              onError={(e) => { (e.target as any).src = "https://placehold.co/400x300/111/555?text=Album"; }}
+              onError={(e) => {
+                const target = e.currentTarget;
+                target.src = 'https://placehold.co/400x300/111/555?text=Album';
+              }}
             />
           )}
         </AnimatePresence>
 
         <div className="absolute bottom-16 left-1/2 -translate-x-1/2 flex space-x-1 pointer-events-none">
-          {previews.map((_: any, i: number) => (
+          {previews.map((_, i) => (
             <div key={i} className={`h-1.5 rounded-full transition-all ${i === currentIdx ? (settings.theme === 'miku' ? 'w-4 bg-[#39C5BB] shadow-[0_0_10px_#39C5BB]' : 'w-4 bg-purple-500 shadow-[0_0_10px_#A855F7]') : 'w-1.5 bg-white/50'}`} />
           ))}
         </div>
