@@ -129,7 +129,7 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
   const [multipartActionBusy, setMultipartActionBusy] = useState(false);
 
   const IMAGE_EXT_RE = /\.(jpg|jpeg|png|webp|gif)$/i;
-  const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v|m3u8|ts)$/i;
+  const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v|m3u8|ts|mkv|avi|wmv|flv|mpeg|mpg|3gp|ogv)$/i;
 
   const getContentTypeByName = (filename: string) => {
     const lower = filename.toLowerCase();
@@ -142,6 +142,13 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
     if (lower.endsWith('.mov')) return 'video/quicktime';
     if (lower.endsWith('.m3u8')) return 'application/vnd.apple.mpegurl';
     if (lower.endsWith('.ts')) return 'video/mp2t';
+    if (lower.endsWith('.mkv')) return 'video/x-matroska';
+    if (lower.endsWith('.avi')) return 'video/x-msvideo';
+    if (lower.endsWith('.wmv')) return 'video/x-ms-wmv';
+    if (lower.endsWith('.flv')) return 'video/x-flv';
+    if (lower.endsWith('.mpeg') || lower.endsWith('.mpg')) return 'video/mpeg';
+    if (lower.endsWith('.3gp')) return 'video/3gpp';
+    if (lower.endsWith('.ogv')) return 'video/ogg';
     return 'application/octet-stream';
   };
 
@@ -992,7 +999,7 @@ export default function UploadModal({ isOpen, onClose, currentPath, onRefresh }:
                 onChange={handleFileChange}
                 multiple
                 className="hidden"
-                accept="image/*,video/*,.zip,.m3u8,.ts"
+                accept="image/*,video/*,.zip,.m3u8,.ts,.mkv,.avi,.wmv,.flv,.mpeg,.mpg,.3gp,.ogv"
               />
               <div className={`w-16 h-16 rounded-full flex items-center justify-center transition-all duration-300 group-hover:scale-110 ${
                 isMiku ? 'bg-slate-100 text-slate-400 group-hover:text-[#39C5BB]' : 'bg-white/10 text-white/30 group-hover:text-blue-400'

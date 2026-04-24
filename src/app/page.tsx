@@ -93,7 +93,7 @@ function getProgressRingDash(progress: number, radius = 22): string {
 }
 
 const IMAGE_EXT_RE = /\.(jpg|jpeg|png|webp|gif)$/i;
-const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v|m3u8)$/i;
+const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v|m3u8|ts|mkv|avi|wmv|flv|mpeg|mpg|3gp|ogv)$/i;
 const naturalSort = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 
 const textContent = (el: Element, tagName: string) => el.getElementsByTagName(tagName)[0]?.textContent || '';
@@ -969,6 +969,11 @@ function GalleryContent() {
         onClose={closeVideoModal}
         url={activeVideoFile?.url || ''}
         title={activeVideoFile?.name || ''}
+        meta={{
+          path: activeVideoFile?.path,
+          size: activeVideoFile?.size,
+          lastModified: activeVideoFile?.lastModified,
+        }}
       />
 
       <TargetPickerModal
